@@ -1,0 +1,57 @@
+[market]
+name = "ashare"
+benchmark = "000300.SH"
+max_positions = 5
+min_position_holding_days = 1
+
+[filters]
+min_list_days = 60
+min_price = 3.0
+min_avg_turnover = 50000000
+exclude_st = true
+exclude_suspended = true
+
+[pricing]
+buy_markup = 0.003
+sell_markdown = 0.003
+cancel_if_gap_exceeds = 0.02
+
+[strategy]
+buy_top_n = 1
+sell_top_n = 1
+lookback_momentum_days = 20
+lookback_short_days = 5
+lookback_vol_days = 20
+
+[backtest]
+initial_cash = 1000000
+commission_rate = 0.0003
+stamp_duty_rate = 0.001
+lot_size = 100
+
+[runtime]
+paper_start_date = "2026-02-02"
+daily_run_time = "18:30"
+timezone = "Asia/Shanghai"
+sync_lookback_days = 7
+calendar_ahead_days = 14
+
+[selection]
+buy_momentum_weight = 0.40
+buy_liquidity_weight = 0.20
+buy_ma20_weight = 0.15
+buy_ma10_weight = 0.10
+buy_volatility_weight = 0.10
+buy_volume_ratio_weight = 0.05
+sell_momentum_weight = 0.45
+sell_ma10_weight = 0.25
+sell_ma20_weight = 0.20
+sell_volatility_weight = 0.10
+min_buy_score = 0.55
+rotation_edge = 0.10
+
+[paths]
+raw_data_dir = "data/raw"
+processed_data_dir = "data/processed"
+reports_dir = "reports/generated"
+logs_dir = "logs"

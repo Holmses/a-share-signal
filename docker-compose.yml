@@ -1,0 +1,17 @@
+services:
+  ashare-signal-daily:
+    build: .
+    image: ashare-signal:latest
+    container_name: ashare-signal-daily
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command:
+      - run-scheduler
+      - --config
+      - ${ASHARE_CONFIG:-configs/strategy.toml.example}
+    restart: unless-stopped
