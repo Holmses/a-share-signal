@@ -67,14 +67,35 @@ def compute_feature_snapshot(
     history["avg_amount_20d_yuan"] = grouped["amount_yuan"].transform(
         lambda series: series.rolling(window=20, min_periods=20).mean()
     )
+    history["avg_amount_5d_yuan"] = grouped["amount_yuan"].transform(
+        lambda series: series.rolling(window=5, min_periods=5).mean()
+    )
+    history["prev_low"] = grouped["low"].shift(1)
     history["ma_10"] = grouped["close"].transform(
         lambda series: series.rolling(window=10, min_periods=10).mean()
+    )
+    history["ma_5"] = grouped["close"].transform(
+        lambda series: series.rolling(window=5, min_periods=5).mean()
     )
     history["ma_20"] = grouped["close"].transform(
         lambda series: series.rolling(window=20, min_periods=20).mean()
     )
+    history["ma_60"] = grouped["close"].transform(
+        lambda series: series.rolling(window=60, min_periods=60).mean()
+    )
+    history["ma_60_lag_20"] = grouped["ma_60"].shift(20)
+    history["high_20d"] = grouped["high"].transform(
+        lambda series: series.rolling(window=20, min_periods=20).max()
+    )
     history["close_to_ma_10"] = history["close"] / history["ma_10"] - 1.0
+    history["close_to_ma_5"] = history["close"] / history["ma_5"] - 1.0
     history["close_to_ma_20"] = history["close"] / history["ma_20"] - 1.0
+    history["close_to_ma_60"] = history["close"] / history["ma_60"] - 1.0
+    history["ma_20_to_ma_60"] = history["ma_20"] / history["ma_60"] - 1.0
+    history["ma_60_slope_20d"] = history["ma_60"] / history["ma_60_lag_20"] - 1.0
+    history["pullback_from_20d_high"] = history["close"] / history["high_20d"] - 1.0
+    history["low_to_prev_low"] = history["low"] / history["prev_low"] - 1.0
+    history["amount_ratio_5d"] = history["amount_yuan"] / history["avg_amount_5d_yuan"]
 
     as_of_timestamp = pd.Timestamp(parse_compact_date(to_compact_date(as_of_trade_date)))
     latest_features = history.loc[history["trade_date"] == as_of_timestamp].copy()
@@ -141,11 +162,21 @@ def compute_feature_snapshot(
                 "momentum_20d_rank_pct",
                 "volatility_20d",
                 "volatility_20d_rank_pct",
+                "avg_amount_5d_yuan",
                 "avg_amount_20d_yuan",
+                "ma_5",
                 "ma_10",
                 "ma_20",
+                "ma_60",
+                "close_to_ma_5",
                 "close_to_ma_10",
                 "close_to_ma_20",
+                "close_to_ma_60",
+                "ma_20_to_ma_60",
+                "ma_60_slope_20d",
+                "pullback_from_20d_high",
+                "low_to_prev_low",
+                "amount_ratio_5d",
             ]
         ],
         on="ts_code",
@@ -219,7 +250,7 @@ def build_universe_snapshot(
         config.strategy.lookback_momentum_days,
         config.strategy.lookback_short_days,
         config.strategy.lookback_vol_days,
-        20,
+        80,
     )
     trade_dates = repository.recent_open_trade_dates(
         actual_trade_date,

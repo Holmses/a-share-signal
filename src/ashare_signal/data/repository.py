@@ -69,6 +69,10 @@ class DataRepository:
             existing = pd.read_csv(path)
             frame = pd.concat([existing, frame], ignore_index=True)
 
+        for date_column in ("cal_date", "pretrade_date", "trade_date", "list_date", "delist_date"):
+            if date_column in frame.columns:
+                frame[date_column] = self._normalize_date_series(frame[date_column])
+
         frame = frame.drop_duplicates(subset=subset, keep="last")
         if sort_by:
             frame = frame.sort_values(sort_by).reset_index(drop=True)
@@ -79,6 +83,9 @@ class DataRepository:
         frame: "pd.DataFrame",
         exchange: str = "SSE",
     ) -> Path:
+        frame = frame.copy()
+        frame["cal_date"] = self._normalize_date_series(frame["cal_date"])
+        frame["pretrade_date"] = self._normalize_date_series(frame["pretrade_date"])
         return self._upsert_csv(
             frame=frame,
             path=self.tushare_root / "trade_cal" / f"{exchange}.csv",

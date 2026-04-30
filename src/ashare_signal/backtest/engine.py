@@ -31,6 +31,7 @@ class BacktestPosition:
     entry_trade_index: int
     entry_trade_date: str
     entry_price: float
+    highest_close: float
 
 
 @dataclass(slots=True)
@@ -143,6 +144,7 @@ class BacktestEngine:
                 cash = cash_box["cash"]
             total_traded_value += traded_today
 
+            self._update_position_highs(positions=positions, prices=prices)
             close_equity = self._mark_to_market_equity(cash, positions, prices, price_field="close")
             equity_rows.append(
                 {
@@ -160,6 +162,16 @@ class BacktestEngine:
                 continue
 
             universe = self._load_or_build_universe(trade_date)
+            all_position_models = [
+                Position(
+                    symbol=position.symbol,
+                    name=position.name,
+                    entry_date=parse_compact_date(position.entry_trade_date),
+                    entry_price=position.entry_price,
+                    quantity=position.shares,
+                )
+                for position in positions.values()
+            ]
             sellable_positions = [
                 Position(
                     symbol=position.symbol,
@@ -171,17 +183,41 @@ class BacktestEngine:
                 for position in positions.values()
                 if trade_index - position.entry_trade_index >= self.config.market.min_position_holding_days
             ]
-            selection = self.selector.select(universe=universe, positions=sellable_positions)
+            rotation_positions = [
+                Position(
+                    symbol=position.symbol,
+                    name=position.name,
+                    entry_date=parse_compact_date(position.entry_trade_date),
+                    entry_price=position.entry_price,
+                    quantity=position.shares,
+                )
+                for position in positions.values()
+                if trade_index - position.entry_trade_index >= self.config.selection.rotation_min_holding_days
+            ]
+            buy_selection = self.selector.select(universe=universe, positions=all_position_models)
+            sell_selection = self.selector.select(universe=universe, positions=rotation_positions)
+            forced_sell = self._select_forced_sell(
+                trade_index=trade_index,
+                universe=universe,
+                prices=prices,
+                positions=positions,
+            )
 
-            buy_candidate = selection.buy_candidates[0] if selection.buy_candidates else None
-            sell_candidate = selection.sell_candidates[0] if sellable_positions and selection.sell_candidates else None
-
-            if len(positions) >= self.config.max_positions:
-                if not self.selector.should_rotate(buy_candidate, sell_candidate):
-                    buy_candidate = None
-                    sell_candidate = None
-            elif not self.selector.should_open_new_position(buy_candidate):
-                buy_candidate = None
+            top_buy = buy_selection.buy_candidates[0] if buy_selection.buy_candidates else None
+            top_sell = sell_selection.sell_candidates[0] if rotation_positions and sell_selection.sell_candidates else None
+            buy_candidate = None
+            sell_candidate = None
+            market_allows_buy = self.selector.market_allows_buy(universe)
+            if forced_sell is not None:
+                sell_candidate = forced_sell
+                if market_allows_buy and self.selector.should_open_new_position(top_buy):
+                    buy_candidate = top_buy
+            elif len(positions) >= self.config.max_positions:
+                if self.selector.should_rotate(top_buy, top_sell):
+                    buy_candidate = top_buy
+                    sell_candidate = top_sell
+            elif market_allows_buy and self.selector.should_open_new_position(top_buy):
+                buy_candidate = top_buy
             if buy_candidate is not None and buy_candidate.symbol in positions:
                 buy_candidate = None
 
@@ -217,7 +253,11 @@ class BacktestEngine:
         trade_log_path = reports_dir / f"backtest-trades-{resolved_start}-{resolved_end}.csv"
 
         equity_frame.to_csv(equity_curve_path, index=False)
-        pd.DataFrame([asdict(trade) for trade in trades]).to_csv(trade_log_path, index=False)
+        trade_columns = list(BacktestTrade.__dataclass_fields__.keys())
+        pd.DataFrame([asdict(trade) for trade in trades], columns=trade_columns).to_csv(
+            trade_log_path,
+            index=False,
+        )
 
         summary_payload = {
             "start_trade_date": resolved_start,
@@ -256,16 +296,31 @@ class BacktestEngine:
         )
 
     def _load_or_build_universe(self, trade_date: str) -> pd.DataFrame:
+        required_columns = {
+            "ma_5",
+            "ma_60",
+            "close_to_ma_5",
+            "close_to_ma_60",
+            "ma_20_to_ma_60",
+            "ma_60_slope_20d",
+            "pullback_from_20d_high",
+            "low_to_prev_low",
+            "amount_ratio_5d",
+        }
         try:
-            return self.repository.load_universe_snapshot(trade_date)
+            universe = self.repository.load_universe_snapshot(trade_date)
+            if required_columns.issubset(universe.columns):
+                return universe
         except FileNotFoundError:
-            universe = build_universe_snapshot(
-                config=self.config,
-                repository=self.repository,
-                trade_date=trade_date,
-            )
-            self.repository.save_universe_snapshot(trade_date, universe)
-            return universe
+            pass
+
+        universe = build_universe_snapshot(
+            config=self.config,
+            repository=self.repository,
+            trade_date=trade_date,
+        )
+        self.repository.save_universe_snapshot(trade_date, universe)
+        return universe
 
     def _mark_to_market_equity(
         self,
@@ -283,6 +338,121 @@ class BacktestEngine:
                 continue
             equity += position.shares * price
         return equity
+
+    def _update_position_highs(
+        self,
+        positions: dict[str, BacktestPosition],
+        prices: pd.DataFrame,
+    ) -> None:
+        for position in positions.values():
+            if position.symbol not in prices.index:
+                continue
+            close_price = float(prices.loc[position.symbol, "close"])
+            if math.isnan(close_price):
+                continue
+            position.highest_close = max(position.highest_close, close_price)
+
+    def _select_forced_sell(
+        self,
+        trade_index: int,
+        universe: pd.DataFrame,
+        prices: pd.DataFrame,
+        positions: dict[str, BacktestPosition],
+    ):
+        if not positions:
+            return None
+
+        frame = universe.set_index("ts_code")
+        candidates = []
+        for position in positions.values():
+            if trade_index - position.entry_trade_index < self.config.market.min_position_holding_days:
+                continue
+            if position.symbol not in prices.index:
+                continue
+
+            close_price = float(prices.loc[position.symbol, "close"])
+            if math.isnan(close_price):
+                continue
+            pnl_pct = close_price / position.entry_price - 1.0
+            drawdown_from_high = close_price / position.highest_close - 1.0 if position.highest_close else 0.0
+
+            reason = None
+            priority = 99
+            if pnl_pct <= -self.config.selection.stop_loss_pct:
+                priority = 0
+                reason = f"硬止损触发：较入场价 {pnl_pct * 100:.1f}%"
+            elif (
+                position.highest_close >= position.entry_price * (1 + self.config.selection.take_profit_trigger_pct)
+                and drawdown_from_high <= -self.config.selection.trailing_stop_drawdown_pct
+            ):
+                priority = 1
+                reason = f"移动止盈触发：最高收盘后回撤 {drawdown_from_high * 100:.1f}%"
+            elif position.symbol in frame.index:
+                row = frame.loc[position.symbol]
+                close_to_ma20 = pd.to_numeric(row.get("close_to_ma_20"), errors="coerce")
+                close_to_ma60 = pd.to_numeric(row.get("close_to_ma_60"), errors="coerce")
+                close_to_ma5 = pd.to_numeric(row.get("close_to_ma_5"), errors="coerce")
+                momentum_5d = pd.to_numeric(row.get("momentum_5d"), errors="coerce")
+                return_1d = pd.to_numeric(row.get("return_1d"), errors="coerce")
+                if close_to_ma60 < 0:
+                    priority = 2
+                    reason = f"长期趋势破坏：跌破60日均线 {close_to_ma60 * 100:.1f}%"
+                elif (
+                    pnl_pct >= self.config.selection.overheat_min_profit_pct
+                    and close_to_ma20 >= self.config.selection.overheat_take_profit_close_to_ma20
+                    and (return_1d < 0 or close_to_ma5 < 0)
+                ):
+                    priority = 2
+                    reason = (
+                        f"过热止盈：较20日均线 {close_to_ma20 * 100:.1f}%，"
+                        f"短线转弱 {return_1d * 100:.1f}%"
+                    )
+                elif (
+                    trade_index - position.entry_trade_index >= self.config.selection.trend_exit_min_holding_days
+                    and close_to_ma20 < 0
+                    and momentum_5d < 0
+                ):
+                    priority = 3
+                    reason = (
+                        f"趋势破坏：跌破20日均线 {close_to_ma20 * 100:.1f}%，"
+                        f"5日动量 {momentum_5d * 100:.1f}%"
+                    )
+
+            if reason is not None:
+                candidates.append(
+                    (
+                        priority,
+                        pnl_pct,
+                        position.symbol,
+                        position.name,
+                        close_price,
+                        reason,
+                    )
+                )
+
+        if not candidates:
+            return None
+
+        priority, pnl_pct, symbol, name, close_price, reason = sorted(candidates)[0]
+        return self._make_sell_candidate(
+            symbol=symbol,
+            name=name,
+            score=float(priority + pnl_pct),
+            reason=reason,
+            last_close=close_price,
+        )
+
+    @staticmethod
+    def _make_sell_candidate(symbol: str, name: str, score: float, reason: str, last_close: float):
+        from ashare_signal.domain.models import Candidate
+
+        return Candidate(
+            symbol=symbol,
+            name=name,
+            score=score,
+            reason=reason,
+            last_close=last_close,
+        )
 
     def _execute_pending_sell(
         self,
@@ -392,6 +562,7 @@ class BacktestEngine:
             entry_trade_index=trade_index,
             entry_trade_date=trade_date,
             entry_price=fill_price,
+            highest_close=fill_price,
         )
         trades.append(
             BacktestTrade(

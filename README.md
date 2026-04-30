@@ -185,6 +185,8 @@ docker compose up -d --build ashare-signal-daily
 - 执行门槛：
   - `min_buy_score` 控制是否允许开新仓
   - `rotation_edge` 控制满仓时是否值得执行 1 卖 1 买
+  - `sell_health_exit_threshold` 控制持仓健康分低到什么程度才允许卖出轮动
+  - `buy_max_close_to_ma20` 控制不追离 20 日均线过远的标的
 
 ## 当前已实现的基础回测
 
