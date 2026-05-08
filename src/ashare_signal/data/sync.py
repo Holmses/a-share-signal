@@ -16,6 +16,8 @@ class SyncResult:
     stock_count: int
     daily_files: int
     daily_basic_files: int
+    moneyflow_files: int
+    limit_list_files: int
 
 
 class TushareSyncService:
@@ -54,6 +56,8 @@ class TushareSyncService:
 
         daily_files = 0
         daily_basic_files = 0
+        moneyflow_files = 0
+        limit_list_files = 0
         for trade_date in open_dates:
             daily = self.client.fetch_daily(trade_date=trade_date)
             if not daily.empty:
@@ -65,6 +69,19 @@ class TushareSyncService:
                 self.repository.save_daily_basic(trade_date, daily_basic)
                 daily_basic_files += 1
 
+            moneyflow = self.client.fetch_moneyflow(trade_date=trade_date)
+            if not moneyflow.empty:
+                self.repository.save_moneyflow(trade_date, moneyflow)
+                moneyflow_files += 1
+
+            try:
+                limit_list = self.client.fetch_limit_list(trade_date=trade_date)
+            except Exception:
+                limit_list = None
+            if limit_list is not None and not limit_list.empty:
+                self.repository.save_limit_list(trade_date, limit_list)
+                limit_list_files += 1
+
         return SyncResult(
             start_date=to_compact_date(start_date),
             end_date=data_end_date,
@@ -73,4 +90,6 @@ class TushareSyncService:
             stock_count=len(stock_basic),
             daily_files=daily_files,
             daily_basic_files=daily_basic_files,
+            moneyflow_files=moneyflow_files,
+            limit_list_files=limit_list_files,
         )

@@ -175,6 +175,12 @@ def test_compute_feature_snapshot_generates_expected_columns(tmp_path) -> None:
     )
 
     assert "momentum_20d" in snapshot.columns
+    assert "return_3d" in snapshot.columns
+    assert "drawdown_20d" in snapshot.columns
+    assert "drawdown_60d" in snapshot.columns
+    assert "down_days_10d" in snapshot.columns
+    assert "consecutive_down_days" in snapshot.columns
+    assert "volume_capitulation_score" in snapshot.columns
     assert "avg_amount_20d_yuan" in snapshot.columns
     assert "total_mv_yuan" in snapshot.columns
     row = snapshot.loc[snapshot["ts_code"] == "600036.SH"].iloc[0]

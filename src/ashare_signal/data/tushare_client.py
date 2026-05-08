@@ -72,3 +72,22 @@ class TushareClient:
                 "free_share,total_mv,circ_mv"
             ),
         )
+
+    def fetch_moneyflow(self, trade_date: str) -> "pd.DataFrame":
+        return self._pro().moneyflow(
+            trade_date=to_compact_date(trade_date),
+            fields=(
+                "ts_code,trade_date,buy_lg_amount,sell_lg_amount,"
+                "buy_elg_amount,sell_elg_amount,net_mf_amount"
+            ),
+        )
+
+    def fetch_limit_list(self, trade_date: str) -> "pd.DataFrame":
+        return self._pro().limit_list_d(
+            trade_date=to_compact_date(trade_date),
+            fields=(
+                "trade_date,ts_code,industry,name,pct_chg,amount,limit_amount,"
+                "float_mv,total_mv,turnover_ratio,fd_amount,open_times,up_stat,"
+                "limit_times,limit"
+            ),
+        )

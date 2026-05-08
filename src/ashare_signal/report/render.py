@@ -16,6 +16,7 @@ def _render_signal(title: str, signal: TradeSignal | None) -> list[str]:
         [
             f"- 动作：{signal.action}",
             f"- 股票：{signal.symbol} {signal.name}",
+            f"- 信号类型：{signal.signal_type}" if signal.signal_type else "- 信号类型：未标注",
             f"- 昨收价：{signal.last_close:.2f}" if signal.last_close is not None else "- 昨收价：未知",
             f"- 建议委托价：{signal.suggested_price:.2f}",
             f"- 分数：{signal.score:.4f}",

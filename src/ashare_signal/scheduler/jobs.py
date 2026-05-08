@@ -62,9 +62,22 @@ def run_daily_signal_job(
 
     top_buy = buy_selection.buy_candidates[0] if buy_selection.buy_candidates else None
     top_sell = sell_selection.sell_candidates[0] if sell_selection.sell_candidates else None
+    if top_buy is not None and top_buy.signal_type == "rebound_bottoming":
+        rebound_positions = 0
+        for position in positions:
+            current = universe.loc[universe["ts_code"] == position.symbol]
+            if not current.empty and current.iloc[0].get("close_to_ma_60", 0) < 0:
+                rebound_positions += 1
+        if rebound_positions >= config.selection.rebound_max_positions:
+            notes.append("筑底反转仓位已达到上限，今日不新增反弹仓位。")
+            top_buy = None
+            buy_selection.buy_candidates = []
     executable_buy_candidates = []
     executable_sell_candidates = []
-    market_allows_buy = selector.market_allows_buy(universe)
+    market_allows_buy = selector.market_allows_buy(
+        universe,
+        signal_type=top_buy.signal_type if top_buy else None,
+    )
     if not market_allows_buy:
         notes.append("市场宽度未达到买入门槛，今日不生成买入执行信号。")
     if len(portfolio.positions) >= config.max_positions:

@@ -270,6 +270,8 @@ def main() -> int:
         print(f"stock_count={result.stock_count}")
         print(f"daily_files={result.daily_files}")
         print(f"daily_basic_files={result.daily_basic_files}")
+        print(f"moneyflow_files={result.moneyflow_files}")
+        print(f"limit_list_files={result.limit_list_files}")
         return 0
 
     if args.command == "build-universe":
@@ -385,6 +387,8 @@ def main() -> int:
             print(f"calendar_end_date={result.sync_result.calendar_end_date}")
             print(f"daily_files={result.sync_result.daily_files}")
             print(f"daily_basic_files={result.sync_result.daily_basic_files}")
+            print(f"moneyflow_files={result.sync_result.moneyflow_files}")
+            print(f"limit_list_files={result.sync_result.limit_list_files}")
         else:
             print("sync=skipped")
         print(f"data_trade_date={result.data_trade_date}")

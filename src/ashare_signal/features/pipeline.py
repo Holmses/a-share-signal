@@ -46,12 +46,16 @@ def compute_feature_snapshot(
     stock_basic: pd.DataFrame,
     as_of_trade_date: str,
     config: AppConfig,
+    moneyflow: pd.DataFrame | None = None,
+    limit_list: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     history = _normalize_history(history)
     grouped = history.groupby("ts_code", group_keys=False)
 
     history["return_1d"] = grouped["close"].pct_change()
     grouped = history.groupby("ts_code", group_keys=False)
+    history["return_3d"] = grouped["close"].pct_change(periods=3)
+    history["return_10d"] = grouped["close"].pct_change(periods=10)
     history["momentum_5d"] = grouped["close"].pct_change(
         periods=config.strategy.lookback_short_days
     )
@@ -87,6 +91,16 @@ def compute_feature_snapshot(
     history["high_20d"] = grouped["high"].transform(
         lambda series: series.rolling(window=20, min_periods=20).max()
     )
+    history["high_60d"] = grouped["high"].transform(
+        lambda series: series.rolling(window=60, min_periods=60).max()
+    )
+    down_day = history["close"] < grouped["close"].shift(1)
+    history["down_days_10d"] = down_day.astype(int).groupby(history["ts_code"]).transform(
+        lambda series: series.rolling(window=10, min_periods=10).sum()
+    )
+    history["consecutive_down_days"] = down_day.groupby(history["ts_code"]).transform(
+        lambda series: series.astype(int).groupby((~series).cumsum()).cumsum()
+    )
     history["close_to_ma_10"] = history["close"] / history["ma_10"] - 1.0
     history["close_to_ma_5"] = history["close"] / history["ma_5"] - 1.0
     history["close_to_ma_20"] = history["close"] / history["ma_20"] - 1.0
@@ -94,8 +108,15 @@ def compute_feature_snapshot(
     history["ma_20_to_ma_60"] = history["ma_20"] / history["ma_60"] - 1.0
     history["ma_60_slope_20d"] = history["ma_60"] / history["ma_60_lag_20"] - 1.0
     history["pullback_from_20d_high"] = history["close"] / history["high_20d"] - 1.0
+    history["drawdown_20d"] = history["close"] / history["high_20d"] - 1.0
+    history["drawdown_60d"] = history["close"] / history["high_60d"] - 1.0
     history["low_to_prev_low"] = history["low"] / history["prev_low"] - 1.0
     history["amount_ratio_5d"] = history["amount_yuan"] / history["avg_amount_5d_yuan"]
+    history["volume_capitulation_score"] = (
+        (1.0 - (history["down_days_10d"] / 10.0)).clip(lower=0.0, upper=1.0) * 0.35
+        + ((history["amount_ratio_5d"] - 0.7) / 1.5).clip(lower=0.0, upper=1.0) * 0.35
+        + ((history["return_3d"] + 0.03) / 0.06).clip(lower=0.0, upper=1.0) * 0.30
+    )
 
     as_of_timestamp = pd.Timestamp(parse_compact_date(to_compact_date(as_of_trade_date)))
     latest_features = history.loc[history["trade_date"] == as_of_timestamp].copy()
@@ -154,9 +175,12 @@ def compute_feature_snapshot(
                 "ts_code",
                 "trade_date",
                 "close",
+                "low",
                 "pct_chg",
                 "amount_yuan",
                 "return_1d",
+                "return_3d",
+                "return_10d",
                 "momentum_5d",
                 "momentum_20d",
                 "momentum_20d_rank_pct",
@@ -175,8 +199,13 @@ def compute_feature_snapshot(
                 "ma_20_to_ma_60",
                 "ma_60_slope_20d",
                 "pullback_from_20d_high",
+                "drawdown_20d",
+                "drawdown_60d",
                 "low_to_prev_low",
                 "amount_ratio_5d",
+                "down_days_10d",
+                "consecutive_down_days",
+                "volume_capitulation_score",
             ]
         ],
         on="ts_code",
@@ -208,6 +237,93 @@ def compute_feature_snapshot(
         on=["ts_code", "trade_date"],
         how="left",
     )
+
+    if moneyflow is not None and not moneyflow.empty:
+        moneyflow_frame = moneyflow.copy()
+        moneyflow_frame["trade_date"] = pd.to_datetime(
+            moneyflow_frame["trade_date"].astype(str),
+            format="%Y%m%d",
+            errors="coerce",
+        )
+        for column in (
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "net_mf_amount",
+        ):
+            moneyflow_frame[column] = pd.to_numeric(moneyflow_frame[column], errors="coerce")
+        moneyflow_frame["large_net_mf_amount"] = (
+            moneyflow_frame["buy_lg_amount"].fillna(0.0)
+            + moneyflow_frame["buy_elg_amount"].fillna(0.0)
+            - moneyflow_frame["sell_lg_amount"].fillna(0.0)
+            - moneyflow_frame["sell_elg_amount"].fillna(0.0)
+        )
+        moneyflow_frame["net_mf_amount_yuan"] = moneyflow_frame["net_mf_amount"] * 10000.0
+        moneyflow_frame["large_net_mf_amount_yuan"] = moneyflow_frame["large_net_mf_amount"] * 10000.0
+        snapshot = snapshot.merge(
+            moneyflow_frame[
+                [
+                    "ts_code",
+                    "trade_date",
+                    "net_mf_amount_yuan",
+                    "large_net_mf_amount_yuan",
+                ]
+            ],
+            on=["ts_code", "trade_date"],
+            how="left",
+        )
+    else:
+        snapshot["net_mf_amount_yuan"] = pd.NA
+        snapshot["large_net_mf_amount_yuan"] = pd.NA
+
+    snapshot["net_mf_to_amount"] = snapshot["net_mf_amount_yuan"] / snapshot["amount_yuan"]
+    snapshot["large_net_mf_to_amount"] = snapshot["large_net_mf_amount_yuan"] / snapshot["amount_yuan"]
+
+    if limit_list is not None and not limit_list.empty:
+        limit_frame = limit_list.copy()
+        limit_frame["trade_date"] = pd.to_datetime(
+            limit_frame["trade_date"].astype(str),
+            format="%Y%m%d",
+            errors="coerce",
+        )
+        for column in ("open_times", "limit_times", "turnover_ratio", "fd_amount"):
+            if column in limit_frame.columns:
+                limit_frame[column] = pd.to_numeric(limit_frame[column], errors="coerce")
+        limit_frame = limit_frame.rename(
+            columns={
+                "limit": "limit_status",
+                "open_times": "limit_open_times",
+                "limit_times": "limit_up_times",
+                "turnover_ratio": "limit_turnover_ratio",
+                "fd_amount": "limit_fd_amount",
+            }
+        )
+        snapshot = snapshot.merge(
+            limit_frame[
+                [
+                    "ts_code",
+                    "trade_date",
+                    "limit_status",
+                    "limit_open_times",
+                    "limit_up_times",
+                    "limit_turnover_ratio",
+                    "limit_fd_amount",
+                ]
+            ],
+            on=["ts_code", "trade_date"],
+            how="left",
+        )
+    else:
+        snapshot["limit_status"] = pd.NA
+        snapshot["limit_open_times"] = pd.NA
+        snapshot["limit_up_times"] = pd.NA
+        snapshot["limit_turnover_ratio"] = pd.NA
+        snapshot["limit_fd_amount"] = pd.NA
+
+    snapshot["is_limit_up"] = snapshot["limit_status"].fillna("").astype(str).eq("U")
+    snapshot["is_limit_down"] = snapshot["limit_status"].fillna("").astype(str).eq("D")
+    snapshot["is_limit_intraday"] = snapshot["limit_status"].fillna("").astype(str).isin(["U", "D", "Z"])
 
     snapshot["trade_date"] = snapshot["trade_date"].fillna(as_of_timestamp)
     snapshot["listed_days"] = (snapshot["trade_date"] - snapshot["list_date"]).dt.days
@@ -259,6 +375,14 @@ def build_universe_snapshot(
     daily_history = repository.load_daily_for_dates(trade_dates)
     daily_basic = repository.load_daily_basic(actual_trade_date)
     stock_basic = repository.load_stock_basic(list_status="L")
+    try:
+        moneyflow = repository.load_moneyflow(actual_trade_date)
+    except FileNotFoundError:
+        moneyflow = None
+    try:
+        limit_list = repository.load_limit_list(actual_trade_date)
+    except FileNotFoundError:
+        limit_list = None
 
     snapshot = compute_feature_snapshot(
         history=daily_history,
@@ -266,5 +390,7 @@ def build_universe_snapshot(
         stock_basic=stock_basic,
         as_of_trade_date=actual_trade_date,
         config=config,
+        moneyflow=moneyflow,
+        limit_list=limit_list,
     )
     return apply_universe_filters(snapshot, config)

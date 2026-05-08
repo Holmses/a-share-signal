@@ -119,6 +119,12 @@ class DataRepository:
     def save_daily_basic(self, trade_date: str, frame: "pd.DataFrame") -> Path:
         return self._write_csv(frame, self.tushare_root / "daily_basic" / f"{trade_date}.csv")
 
+    def save_moneyflow(self, trade_date: str, frame: "pd.DataFrame") -> Path:
+        return self._write_csv(frame, self.tushare_root / "moneyflow" / f"{trade_date}.csv")
+
+    def save_limit_list(self, trade_date: str, frame: "pd.DataFrame") -> Path:
+        return self._write_csv(frame, self.tushare_root / "limit_list" / f"{trade_date}.csv")
+
     def load_daily(self, trade_date: str) -> "pd.DataFrame":
         frame = self._read_csv(self.tushare_root / "daily" / f"{trade_date}.csv")
         frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
@@ -126,6 +132,16 @@ class DataRepository:
 
     def load_daily_basic(self, trade_date: str) -> "pd.DataFrame":
         frame = self._read_csv(self.tushare_root / "daily_basic" / f"{trade_date}.csv")
+        frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
+        return frame
+
+    def load_moneyflow(self, trade_date: str) -> "pd.DataFrame":
+        frame = self._read_csv(self.tushare_root / "moneyflow" / f"{trade_date}.csv")
+        frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
+        return frame
+
+    def load_limit_list(self, trade_date: str) -> "pd.DataFrame":
+        frame = self._read_csv(self.tushare_root / "limit_list" / f"{trade_date}.csv")
         frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
         return frame
 

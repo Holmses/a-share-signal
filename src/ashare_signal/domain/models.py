@@ -11,6 +11,9 @@ class Candidate:
     score: float
     reason: str
     last_close: float
+    signal_type: str = "trend_pullback"
+    signal_low: float | None = None
+    exit_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -34,6 +37,7 @@ class TradeSignal:
     score: float
     reason: str
     last_close: float | None = None
+    signal_type: str | None = None
 
 
 @dataclass(slots=True)

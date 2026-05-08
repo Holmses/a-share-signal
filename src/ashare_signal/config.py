@@ -52,6 +52,7 @@ class BacktestConfig:
 
 @dataclass(slots=True)
 class SelectionConfig:
+    enable_rebound_strategy: bool = True
     buy_momentum_weight: float = 0.40
     buy_liquidity_weight: float = 0.20
     buy_ma20_weight: float = 0.15
@@ -88,6 +89,37 @@ class SelectionConfig:
     rotation_min_holding_days: int = 5
     overheat_take_profit_close_to_ma20: float = 0.18
     overheat_min_profit_pct: float = 0.08
+    rebound_min_score: float = 0.60
+    rebound_max_close_to_ma60_below: float = 0.18
+    rebound_min_drawdown_20d: float = -0.08
+    rebound_min_drawdown_60d: float = -0.08
+    rebound_max_drawdown_60d: float = -0.35
+    rebound_max_down_days_10d: int = 7
+    rebound_min_return_3d: float = -0.01
+    rebound_max_return_3d: float = 0.16
+    rebound_max_close_to_ma5: float = 0.12
+    rebound_max_close_to_ma20: float = 0.10
+    rebound_min_amount_ratio_5d: float = 0.70
+    rebound_max_amount_ratio_5d: float = 2.20
+    rebound_max_volume_ratio: float = 3.00
+    rebound_ideal_max_return_3d: float = 0.08
+    rebound_ideal_max_close_to_ma5: float = 0.06
+    rebound_ideal_max_close_to_ma20: float = 0.03
+    rebound_max_volatility_20d: float = 0.08
+    rebound_min_large_net_mf_to_amount: float = -0.03
+    rebound_prefer_large_net_mf_to_amount: float = 0.02
+    rebound_market_min_breadth: float = 0.25
+    rebound_max_positions: int = 2
+    rebound_position_size_multiplier: float = 0.50
+    rebound_stop_loss_pct: float = 0.05
+    rebound_fast_exit_days: int = 3
+    rebound_breakeven_trigger_pct: float = 0.08
+    rebound_breakeven_floor_pct: float = 0.01
+    rebound_profit_lock_trigger_pct: float = 0.15
+    rebound_profit_lock_drawdown_pct: float = 0.06
+    rebound_big_profit_trigger_pct: float = 0.25
+    rebound_big_profit_drawdown_pct: float = 0.10
+    rebound_profit_exit_min_pct: float = 0.15
 
 
 @dataclass(slots=True)

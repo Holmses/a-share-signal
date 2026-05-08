@@ -32,6 +32,8 @@ class BacktestPosition:
     entry_trade_date: str
     entry_price: float
     highest_close: float
+    signal_type: str = "trend_pullback"
+    signal_low: float | None = None
 
 
 @dataclass(slots=True)
@@ -46,6 +48,8 @@ class BacktestTrade:
     fees: float
     net_amount: float
     signal_trade_date: str
+    signal_type: str = ""
+    exit_reason: str = ""
     pnl: float | None = None
 
 
@@ -207,7 +211,12 @@ class BacktestEngine:
             top_sell = sell_selection.sell_candidates[0] if rotation_positions and sell_selection.sell_candidates else None
             buy_candidate = None
             sell_candidate = None
-            market_allows_buy = self.selector.market_allows_buy(universe)
+            market_allows_buy = self.selector.market_allows_buy(
+                universe,
+                signal_type=top_buy.signal_type if top_buy else None,
+            )
+            if top_buy is not None and not self._can_add_buy_candidate(top_buy, positions):
+                top_buy = None
             if forced_sell is not None:
                 sell_candidate = forced_sell
                 if market_allows_buy and self.selector.should_open_new_position(top_buy):
@@ -306,6 +315,13 @@ class BacktestEngine:
             "pullback_from_20d_high",
             "low_to_prev_low",
             "amount_ratio_5d",
+            "return_3d",
+            "return_10d",
+            "drawdown_20d",
+            "drawdown_60d",
+            "down_days_10d",
+            "consecutive_down_days",
+            "volume_capitulation_score",
         }
         try:
             universe = self.repository.load_universe_snapshot(trade_date)
@@ -352,6 +368,16 @@ class BacktestEngine:
                 continue
             position.highest_close = max(position.highest_close, close_price)
 
+    def _can_add_buy_candidate(self, candidate, positions: dict[str, BacktestPosition]) -> bool:
+        if candidate is None:
+            return False
+        if candidate.signal_type != "rebound_bottoming":
+            return True
+        rebound_positions = sum(
+            1 for position in positions.values() if position.signal_type == "rebound_bottoming"
+        )
+        return rebound_positions < self.config.selection.rebound_max_positions
+
     def _select_forced_sell(
         self,
         trade_index: int,
@@ -375,18 +401,70 @@ class BacktestEngine:
                 continue
             pnl_pct = close_price / position.entry_price - 1.0
             drawdown_from_high = close_price / position.highest_close - 1.0 if position.highest_close else 0.0
+            max_profit_pct = position.highest_close / position.entry_price - 1.0 if position.entry_price else 0.0
 
             reason = None
+            exit_reason = None
             priority = 99
-            if pnl_pct <= -self.config.selection.stop_loss_pct:
+            holding_trade_days = trade_index - position.entry_trade_index
+            if position.signal_type == "rebound_bottoming":
+                if pnl_pct <= -self.config.selection.rebound_stop_loss_pct:
+                    priority = 0
+                    reason = f"筑底反转快速止损：较入场价 {pnl_pct * 100:.1f}%"
+                    exit_reason = "rebound_stop_loss"
+                elif (
+                    position.signal_low is not None
+                    and close_price < position.signal_low
+                ):
+                    priority = 0
+                    reason = f"筑底反转破信号低点：收盘价低于 {position.signal_low:.2f}"
+                    exit_reason = "rebound_signal_low_break"
+                elif (
+                    holding_trade_days >= self.config.selection.rebound_fast_exit_days
+                    and close_price < position.entry_price
+                ):
+                    priority = 1
+                    reason = (
+                        f"筑底反转未按期转强：持有 {holding_trade_days} 个交易日后仍低于成本"
+                    )
+                    exit_reason = "rebound_fast_exit"
+                elif (
+                    max_profit_pct >= self.config.selection.rebound_big_profit_trigger_pct
+                    and drawdown_from_high <= -self.config.selection.rebound_big_profit_drawdown_pct
+                ):
+                    priority = 1
+                    reason = f"筑底反转大幅盈利移动止盈：最高收盘后回撤 {drawdown_from_high * 100:.1f}%"
+                    exit_reason = "rebound_big_profit_trailing"
+                elif (
+                    max_profit_pct >= self.config.selection.rebound_profit_lock_trigger_pct
+                    and drawdown_from_high <= -self.config.selection.rebound_profit_lock_drawdown_pct
+                ):
+                    priority = 1
+                    reason = f"筑底反转利润锁定：最高收盘后回撤 {drawdown_from_high * 100:.1f}%"
+                    exit_reason = "rebound_profit_lock"
+                elif (
+                    max_profit_pct >= self.config.selection.rebound_breakeven_trigger_pct
+                    and pnl_pct <= self.config.selection.rebound_breakeven_floor_pct
+                ):
+                    priority = 1
+                    reason = (
+                        f"筑底反转保本止盈：曾盈利 {max_profit_pct * 100:.1f}%，"
+                        f"当前回落至 {pnl_pct * 100:.1f}%"
+                    )
+                    exit_reason = "rebound_breakeven"
+            if reason is not None:
+                pass
+            elif pnl_pct <= -self.config.selection.stop_loss_pct:
                 priority = 0
                 reason = f"硬止损触发：较入场价 {pnl_pct * 100:.1f}%"
+                exit_reason = "stop_loss"
             elif (
                 position.highest_close >= position.entry_price * (1 + self.config.selection.take_profit_trigger_pct)
                 and drawdown_from_high <= -self.config.selection.trailing_stop_drawdown_pct
             ):
                 priority = 1
                 reason = f"移动止盈触发：最高收盘后回撤 {drawdown_from_high * 100:.1f}%"
+                exit_reason = "trailing_take_profit"
             elif position.symbol in frame.index:
                 row = frame.loc[position.symbol]
                 close_to_ma20 = pd.to_numeric(row.get("close_to_ma_20"), errors="coerce")
@@ -394,9 +472,22 @@ class BacktestEngine:
                 close_to_ma5 = pd.to_numeric(row.get("close_to_ma_5"), errors="coerce")
                 momentum_5d = pd.to_numeric(row.get("momentum_5d"), errors="coerce")
                 return_1d = pd.to_numeric(row.get("return_1d"), errors="coerce")
-                if close_to_ma60 < 0:
+                if (
+                    position.signal_type == "rebound_bottoming"
+                    and pnl_pct >= self.config.selection.rebound_profit_exit_min_pct
+                    and close_to_ma5 < 0
+                    and return_1d < 0
+                ):
+                    priority = 1
+                    reason = (
+                        f"筑底反转盈利后短线转弱：收益 {pnl_pct * 100:.1f}%，"
+                        f"较5日均线 {close_to_ma5 * 100:.1f}%"
+                    )
+                    exit_reason = "rebound_profit_short_weak"
+                elif close_to_ma60 < 0:
                     priority = 2
                     reason = f"长期趋势破坏：跌破60日均线 {close_to_ma60 * 100:.1f}%"
+                    exit_reason = "ma60_break"
                 elif (
                     pnl_pct >= self.config.selection.overheat_min_profit_pct
                     and close_to_ma20 >= self.config.selection.overheat_take_profit_close_to_ma20
@@ -407,6 +498,7 @@ class BacktestEngine:
                         f"过热止盈：较20日均线 {close_to_ma20 * 100:.1f}%，"
                         f"短线转弱 {return_1d * 100:.1f}%"
                     )
+                    exit_reason = "overheat_take_profit"
                 elif (
                     trade_index - position.entry_trade_index >= self.config.selection.trend_exit_min_holding_days
                     and close_to_ma20 < 0
@@ -417,6 +509,7 @@ class BacktestEngine:
                         f"趋势破坏：跌破20日均线 {close_to_ma20 * 100:.1f}%，"
                         f"5日动量 {momentum_5d * 100:.1f}%"
                     )
+                    exit_reason = "trend_break"
 
             if reason is not None:
                 candidates.append(
@@ -427,23 +520,25 @@ class BacktestEngine:
                         position.name,
                         close_price,
                         reason,
+                        exit_reason,
                     )
                 )
 
         if not candidates:
             return None
 
-        priority, pnl_pct, symbol, name, close_price, reason = sorted(candidates)[0]
+        priority, pnl_pct, symbol, name, close_price, reason, exit_reason = sorted(candidates)[0]
         return self._make_sell_candidate(
             symbol=symbol,
             name=name,
             score=float(priority + pnl_pct),
             reason=reason,
             last_close=close_price,
+            exit_reason=exit_reason,
         )
 
     @staticmethod
-    def _make_sell_candidate(symbol: str, name: str, score: float, reason: str, last_close: float):
+    def _make_sell_candidate(symbol: str, name: str, score: float, reason: str, last_close: float, exit_reason: str | None = None):
         from ashare_signal.domain.models import Candidate
 
         return Candidate(
@@ -452,6 +547,8 @@ class BacktestEngine:
             score=score,
             reason=reason,
             last_close=last_close,
+            signal_type="risk_exit",
+            exit_reason=exit_reason,
         )
 
     def _execute_pending_sell(
@@ -499,6 +596,8 @@ class BacktestEngine:
                 fees=fees,
                 net_amount=net_amount,
                 signal_trade_date=pending_signal.signal_trade_date,
+                signal_type=candidate.signal_type,
+                exit_reason=candidate.exit_reason or "",
                 pnl=pnl,
             )
         )
@@ -541,6 +640,8 @@ class BacktestEngine:
             price_field="open",
         )
         target_value = portfolio_value_at_open / self.config.max_positions
+        if candidate.signal_type == "rebound_bottoming":
+            target_value *= self.config.selection.rebound_position_size_multiplier
         raw_shares = int(target_value / fill_price)
         shares = (raw_shares // self.config.backtest.lot_size) * self.config.backtest.lot_size
         max_affordable = int(
@@ -563,6 +664,8 @@ class BacktestEngine:
             entry_trade_date=trade_date,
             entry_price=fill_price,
             highest_close=fill_price,
+            signal_type=candidate.signal_type,
+            signal_low=candidate.signal_low,
         )
         trades.append(
             BacktestTrade(
@@ -576,6 +679,8 @@ class BacktestEngine:
                 fees=fees,
                 net_amount=net_amount,
                 signal_trade_date=pending_signal.signal_trade_date,
+                signal_type=candidate.signal_type,
+                exit_reason="",
                 pnl=None,
             )
         )

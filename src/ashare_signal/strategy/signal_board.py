@@ -33,6 +33,7 @@ class SignalStrategy:
             score=chosen.score,
             reason=chosen.reason,
             last_close=chosen.last_close,
+            signal_type=chosen.signal_type,
         )
 
     def pick_sell_signal(self, candidates: list[Candidate]) -> TradeSignal | None:
@@ -50,6 +51,7 @@ class SignalStrategy:
             score=chosen.score,
             reason=chosen.reason,
             last_close=chosen.last_close,
+            signal_type=chosen.signal_type,
         )
 
     def build_board(

@@ -32,9 +32,12 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
     frame = universe.copy()
     numeric_columns = [
         "close",
+        "low",
         "pct_chg",
         "amount_yuan",
         "return_1d",
+        "return_3d",
+        "return_10d",
         "momentum_5d",
         "momentum_20d",
         "momentum_20d_rank_pct",
@@ -53,8 +56,21 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
         "ma_20_to_ma_60",
         "ma_60_slope_20d",
         "pullback_from_20d_high",
+        "drawdown_20d",
+        "drawdown_60d",
         "low_to_prev_low",
         "amount_ratio_5d",
+        "down_days_10d",
+        "consecutive_down_days",
+        "volume_capitulation_score",
+        "net_mf_amount_yuan",
+        "large_net_mf_amount_yuan",
+        "net_mf_to_amount",
+        "large_net_mf_to_amount",
+        "limit_open_times",
+        "limit_up_times",
+        "limit_turnover_ratio",
+        "limit_fd_amount",
         "turnover_rate",
         "turnover_rate_f",
         "volume_ratio",
@@ -77,6 +93,9 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
         "passes_listing_age_filter",
         "passes_price_filter",
         "passes_liquidity_filter",
+        "is_limit_up",
+        "is_limit_down",
+        "is_limit_intraday",
     ]
     for column in bool_columns:
         if column in frame.columns:
@@ -91,6 +110,22 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
             if frame[column].dtype != bool:
                 frame[column] = frame[column].astype(bool)
 
+    for column in (
+        "net_mf_to_amount",
+        "large_net_mf_to_amount",
+        "net_mf_amount_yuan",
+        "large_net_mf_amount_yuan",
+        "limit_open_times",
+        "limit_up_times",
+        "limit_turnover_ratio",
+        "limit_fd_amount",
+    ):
+        if column not in frame.columns:
+            frame[column] = pd.NA
+    for column in ("is_limit_up", "is_limit_down", "is_limit_intraday"):
+        if column not in frame.columns:
+            frame[column] = False
+
     return frame
 
 
@@ -104,6 +139,7 @@ def _clip_score(series: pd.Series, lower: float, upper: float) -> pd.Series:
 
 def _buy_reason(row: pd.Series) -> str:
     return (
+        "策略类型：趋势回撤；"
         f"MA20/MA60 {_format_pct(row['ma_20_to_ma_60'])}，"
         f"MA60斜率 {_format_pct(row['ma_60_slope_20d'])}，"
         f"20日高点回撤 {_format_pct(row['pullback_from_20d_high'])}，"
@@ -112,6 +148,21 @@ def _buy_reason(row: pd.Series) -> str:
         f"20日动量分位 {_format_pct(row['momentum_20d_rank_pct'])}，"
         f"20日日均成交额 {_format_amount_yi(row['avg_amount_20d_yuan'])}，"
         f"5日量能比 {row['amount_ratio_5d']:.2f}。"
+    )
+
+
+def _rebound_reason(row: pd.Series) -> str:
+    return (
+        "策略类型：中线筑底反转；"
+        f"20日回撤 {_format_pct(row['drawdown_20d'])}，"
+        f"60日回撤 {_format_pct(row['drawdown_60d'])}，"
+        f"3日收益 {_format_pct(row['return_3d'])}，"
+        f"10日收益 {_format_pct(row['return_10d'])}，"
+        f"10日下跌天数 {row['down_days_10d']:.0f}，"
+        f"连续下跌天数 {row['consecutive_down_days']:.0f}，"
+        f"较60日均线 {_format_pct(row['close_to_ma_60'])}，"
+        f"5日量能比 {row['amount_ratio_5d']:.2f}，"
+        f"大单净流入/成交额 {_format_pct(row.get('large_net_mf_to_amount'))}。"
     )
 
 
@@ -164,6 +215,19 @@ class UniverseSignalSelector:
         )
 
     def _select_buy_candidates(self, buy_pool: pd.DataFrame) -> list[Candidate]:
+        if buy_pool.empty:
+            return []
+
+        trend_candidates = self._select_trend_buy_candidates(buy_pool)
+        rebound_candidates = self._select_rebound_buy_candidates(buy_pool)
+        ranked = sorted(
+            trend_candidates + rebound_candidates,
+            key=lambda candidate: candidate.score,
+            reverse=True,
+        )
+        return ranked[: self.top_buy_n]
+
+    def _select_trend_buy_candidates(self, buy_pool: pd.DataFrame) -> list[Candidate]:
         if buy_pool.empty:
             return []
 
@@ -239,6 +303,138 @@ class UniverseSignalSelector:
                 score=float(row["buy_score"]),
                 reason=_buy_reason(row),
                 last_close=float(row["close"]),
+                signal_type="trend_pullback",
+                signal_low=float(row["low"]) if "low" in row and pd.notna(row["low"]) else None,
+            )
+            for _, row in ranked.iterrows()
+        ]
+
+    def _select_rebound_buy_candidates(self, buy_pool: pd.DataFrame) -> list[Candidate]:
+        if buy_pool.empty or not self.selection_config.enable_rebound_strategy:
+            return []
+
+        buy_pool = buy_pool.copy()
+        buy_pool = buy_pool.loc[
+            (buy_pool["drawdown_20d"] <= self.selection_config.rebound_min_drawdown_20d)
+            & (buy_pool["drawdown_60d"] <= self.selection_config.rebound_min_drawdown_60d)
+            & (buy_pool["drawdown_60d"] >= self.selection_config.rebound_max_drawdown_60d)
+            & (buy_pool["close_to_ma_60"] >= -self.selection_config.rebound_max_close_to_ma60_below)
+            & (buy_pool["down_days_10d"] <= self.selection_config.rebound_max_down_days_10d)
+            & (buy_pool["consecutive_down_days"] <= 4)
+            & (buy_pool["return_3d"] > 0)
+            & (buy_pool["return_3d"] <= self.selection_config.rebound_max_return_3d)
+            & (buy_pool["close_to_ma_5"] >= 0)
+            & (buy_pool["close_to_ma_5"] <= self.selection_config.rebound_max_close_to_ma5)
+            & (buy_pool["close_to_ma_20"] <= self.selection_config.rebound_max_close_to_ma20)
+            & (buy_pool["return_1d"] > 0)
+            & (buy_pool["return_1d"] <= self.selection_config.buy_max_return_1d)
+            & (buy_pool["low_to_prev_low"] >= 0)
+            & (buy_pool["amount_ratio_5d"] >= self.selection_config.rebound_min_amount_ratio_5d)
+            & (buy_pool["amount_ratio_5d"] <= self.selection_config.rebound_max_amount_ratio_5d)
+            & (buy_pool["total_mv_yuan"] >= self.selection_config.buy_min_total_mv_yuan)
+            & (
+                buy_pool["large_net_mf_to_amount"].isna()
+                | (buy_pool["large_net_mf_to_amount"] >= self.selection_config.rebound_min_large_net_mf_to_amount)
+            )
+            & (~buy_pool["is_limit_up"].fillna(False))
+            & (~buy_pool["is_limit_down"].fillna(False))
+            & (
+                buy_pool["volume_ratio"].isna()
+                | (buy_pool["volume_ratio"] <= self.selection_config.rebound_max_volume_ratio)
+            )
+        ].copy()
+        if buy_pool.empty:
+            return []
+
+        drawdown_floor = abs(self.selection_config.rebound_min_drawdown_20d)
+        drawdown_ceiling = abs(self.selection_config.rebound_max_drawdown_60d)
+        buy_pool["rebound_drawdown_score"] = _clip_score(
+            -buy_pool["drawdown_20d"],
+            drawdown_floor,
+            drawdown_ceiling,
+        )
+        buy_pool["rebound_depth_control_score"] = (
+            1.0
+            - _clip_score(
+                -buy_pool["drawdown_60d"],
+                drawdown_ceiling * 0.60,
+                drawdown_ceiling,
+            )
+        ).clip(lower=0.0, upper=1.0)
+        buy_pool["rebound_stabilization_score"] = (
+            _clip_score(buy_pool["return_3d"], self.selection_config.rebound_min_return_3d, 0.05) * 0.35
+            + _clip_score(buy_pool["low_to_prev_low"], -0.02, 0.04) * 0.25
+            + _clip_score(buy_pool["close_to_ma_5"], -0.03, 0.03) * 0.20
+            + (1.0 - _clip_score(buy_pool["down_days_10d"], 4.0, 8.0)).clip(lower=0.0, upper=1.0) * 0.20
+        )
+        buy_pool["rebound_liquidity_score"] = (
+            _clip_score(
+                buy_pool["amount_ratio_5d"],
+                self.selection_config.rebound_min_amount_ratio_5d,
+                self.selection_config.rebound_max_amount_ratio_5d,
+            )
+            * 0.55
+            + _rank(buy_pool["avg_amount_20d_yuan"]) * 0.45
+        )
+        buy_pool["rebound_moneyflow_score"] = _clip_score(
+            buy_pool["large_net_mf_to_amount"],
+            self.selection_config.rebound_min_large_net_mf_to_amount,
+            self.selection_config.rebound_prefer_large_net_mf_to_amount,
+        )
+        buy_pool["rebound_heat_penalty"] = (
+            _clip_score(
+                buy_pool["return_3d"],
+                self.selection_config.rebound_ideal_max_return_3d,
+                self.selection_config.rebound_max_return_3d,
+            )
+            * 0.35
+            + _clip_score(
+                buy_pool["close_to_ma_5"],
+                self.selection_config.rebound_ideal_max_close_to_ma5,
+                self.selection_config.rebound_max_close_to_ma5,
+            )
+            * 0.25
+            + _clip_score(
+                buy_pool["close_to_ma_20"],
+                self.selection_config.rebound_ideal_max_close_to_ma20,
+                self.selection_config.rebound_max_close_to_ma20,
+            )
+            * 0.20
+            + _clip_score(
+                buy_pool["volatility_20d"],
+                0.05,
+                self.selection_config.rebound_max_volatility_20d,
+            )
+            * 0.20
+            + buy_pool["is_limit_intraday"].fillna(False).astype(float) * 0.20
+        ).clip(lower=0.0, upper=1.0)
+        buy_pool["rebound_score"] = (
+            buy_pool["rebound_drawdown_score"] * 0.25
+            + buy_pool["rebound_depth_control_score"] * 0.20
+            + buy_pool["rebound_stabilization_score"] * 0.25
+            + buy_pool["rebound_liquidity_score"] * 0.15
+            + buy_pool["rebound_moneyflow_score"] * 0.10
+            + buy_pool["volume_capitulation_score"].fillna(0.0) * 0.10
+            - buy_pool["rebound_heat_penalty"] * 0.20
+        )
+        ranked = buy_pool.sort_values(
+            [
+                "rebound_score",
+                "rebound_stabilization_score",
+                "volume_capitulation_score",
+                "avg_amount_20d_yuan",
+            ],
+            ascending=[False, False, False, False],
+        ).head(self.top_buy_n)
+        return [
+            Candidate(
+                symbol=row["ts_code"],
+                name=row["name"],
+                score=float(row["rebound_score"]),
+                reason=_rebound_reason(row),
+                last_close=float(row["close"]),
+                signal_type="rebound_bottoming",
+                signal_low=float(row["low"]) if "low" in row and pd.notna(row["low"]) else None,
             )
             for _, row in ranked.iterrows()
         ]
@@ -272,6 +468,7 @@ class UniverseSignalSelector:
                 score=float(row["sell_health_score"]),
                 reason=_sell_reason(row),
                 last_close=float(row["close"]),
+                signal_type="rotation_exit",
             )
             for _, row in ranked.iterrows()
         ]
@@ -279,9 +476,11 @@ class UniverseSignalSelector:
     def should_open_new_position(self, buy_candidate: Candidate | None) -> bool:
         if buy_candidate is None:
             return False
+        if buy_candidate.signal_type == "rebound_bottoming":
+            return buy_candidate.score >= self.selection_config.rebound_min_score
         return buy_candidate.score >= self.selection_config.min_buy_score
 
-    def market_allows_buy(self, universe: pd.DataFrame) -> bool:
+    def market_allows_buy(self, universe: pd.DataFrame, signal_type: str | None = None) -> bool:
         frame = _coerce_universe(universe)
         pool = frame.loc[frame["is_candidate"]].copy()
         if pool.empty:
@@ -290,6 +489,10 @@ class UniverseSignalSelector:
             (pool["close_to_ma_20"] > 0)
             & (pool["momentum_20d"] > 0)
         ).mean()
+        if signal_type == "rebound_bottoming":
+            return float(breadth) >= self.selection_config.rebound_market_min_breadth
+        if signal_type == "trend_pullback":
+            return float(breadth) >= self.selection_config.market_min_breadth
         return float(breadth) >= self.selection_config.market_min_breadth
 
     def should_rotate(
