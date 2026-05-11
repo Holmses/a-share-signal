@@ -11,6 +11,8 @@ from ashare_signal.data.repository import DataRepository
 from ashare_signal.portfolio.manager import PortfolioManager
 from ashare_signal.scheduler.daily import run_daily_workflow, run_scheduler
 from ashare_signal.scheduler.jobs import run_daily_signal_job
+from ashare_signal.scheduler.tianzhu9_daily import run_tianzhu9_daily_workflow, run_tianzhu9_scheduler
+from ashare_signal.strategy.tianzhu9_orders import generate_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date
 
 
@@ -166,6 +168,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Minimum 20-day average turnover in yuan",
     )
     tianzhu9.add_argument(
+        "--execution-mode",
+        choices=["intraday", "limit-swing"],
+        default="intraday",
+        help="Use intraday open/close execution or prior-close limit swing execution",
+    )
+    tianzhu9.add_argument(
         "--extend-on-repeat",
         action="store_true",
         help="Keep holding a symbol if it remains in the next day's top ranks",
@@ -176,6 +184,51 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Maximum hold duration when --extend-on-repeat is enabled",
     )
+
+    tianzhu9_orders = subparsers.add_parser(
+        "generate-tianzhu9-orders",
+        help="Generate next-day Tianzhu9 buy/sell plan from local cache",
+    )
+    tianzhu9_orders.add_argument("--config", default="configs/strategy.toml.example")
+    tianzhu9_orders.add_argument("--as-of", default=None, help="Signal date in ISO format, defaults to today")
+    tianzhu9_orders.add_argument(
+        "--positions",
+        default=None,
+        help="Tianzhu9 positions CSV path, defaults to data/positions/tianzhu9_positions.csv",
+    )
+    tianzhu9_orders.add_argument("--top-n", type=int, default=1)
+    tianzhu9_orders.add_argument("--hold-days", type=int, default=2)
+    tianzhu9_orders.add_argument("--max-hold-days", type=int, default=4)
+
+    tianzhu9_daily = subparsers.add_parser(
+        "run-tianzhu9-daily",
+        help="Sync data, generate Tianzhu9 order plan, and send Feishu notification once",
+    )
+    tianzhu9_daily.add_argument("--config", default="configs/strategy.toml.example")
+    tianzhu9_daily.add_argument("--end-date", default=None)
+    tianzhu9_daily.add_argument("--sync-start-date", default=None)
+    tianzhu9_daily.add_argument("--skip-sync", action="store_true")
+    tianzhu9_daily.add_argument("--positions", default=None)
+    tianzhu9_daily.add_argument("--no-notify", action="store_true")
+    tianzhu9_daily.add_argument("--top-n", type=int, default=1)
+    tianzhu9_daily.add_argument("--hold-days", type=int, default=2)
+    tianzhu9_daily.add_argument("--max-hold-days", type=int, default=4)
+
+    tianzhu9_scheduler = subparsers.add_parser(
+        "run-tianzhu9-scheduler",
+        help="Run Tianzhu9 daily Feishu workflow on a fixed local time",
+    )
+    tianzhu9_scheduler.add_argument("--config", default="configs/strategy.toml.example")
+    tianzhu9_scheduler.add_argument("--run-at", default=None)
+    tianzhu9_scheduler.add_argument("--timezone", default=None)
+    tianzhu9_scheduler.add_argument("--sync-start-date", default=None)
+    tianzhu9_scheduler.add_argument("--skip-sync", action="store_true")
+    tianzhu9_scheduler.add_argument("--positions", default=None)
+    tianzhu9_scheduler.add_argument("--run-on-start", action="store_true")
+    tianzhu9_scheduler.add_argument("--no-notify", action="store_true")
+    tianzhu9_scheduler.add_argument("--top-n", type=int, default=1)
+    tianzhu9_scheduler.add_argument("--hold-days", type=int, default=2)
+    tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=4)
 
     run_daily = subparsers.add_parser(
         "run-daily",
@@ -397,6 +450,7 @@ def main() -> int:
                 hold_days=args.hold_days,
                 max_position_weight=args.max_position_weight,
                 min_avg_amount_yuan=args.min_avg_amount_yuan,
+                execution_mode=args.execution_mode,
                 extend_on_repeat=args.extend_on_repeat,
                 max_hold_days=args.max_hold_days,
             ).run(
@@ -423,6 +477,7 @@ def main() -> int:
         print(f"trade_count={result.trade_count}")
         print(f"sell_trade_count={result.sell_trade_count}")
         print(f"win_rate={result.win_rate}")
+        print(f"execution_mode={result.execution_mode}")
         print(f"extend_on_repeat={result.extend_on_repeat}")
         print(f"max_hold_days={result.max_hold_days}")
         print(f"equity_curve_path={result.equity_curve_path}")
@@ -465,6 +520,60 @@ def main() -> int:
         print(f"state_path={portfolio_result.state_path}")
         print(f"snapshots_dir={portfolio_result.snapshots_dir}")
         print(f"signal_path={signal_path}")
+        return 0
+
+    if args.command == "generate-tianzhu9-orders":
+        try:
+            plan = generate_tianzhu9_order_plan(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                as_of=_parse_date(args.as_of) if args.as_of else None,
+                positions_path=base_dir / args.positions if args.positions else None,
+                top_n=args.top_n,
+                hold_days=args.hold_days,
+                max_hold_days=args.max_hold_days,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print("Tianzhu9 order plan generated")
+        print(f"signal_trade_date={plan.signal_trade_date}")
+        print(f"planned_trade_date={plan.planned_trade_date}")
+        print(f"buy_orders={len(plan.buy_orders)}")
+        print(f"sell_orders={len(plan.sell_orders)}")
+        print(f"hold_orders={len(plan.hold_orders)}")
+        print(f"markdown_path={plan.markdown_path}")
+        print(f"json_path={plan.json_path}")
+        return 0
+
+    if args.command == "run-tianzhu9-daily":
+        try:
+            result = run_tianzhu9_daily_workflow(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                end_date=args.end_date,
+                sync_start_date=args.sync_start_date,
+                skip_sync=args.skip_sync,
+                positions_path=args.positions,
+                notify=not args.no_notify,
+                top_n=args.top_n,
+                hold_days=args.hold_days,
+                max_hold_days=args.max_hold_days,
+            )
+        except ModuleNotFoundError as error:
+            _handle_missing_dependency(parser, error)
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print("Tianzhu9 daily workflow completed")
+        print(f"data_trade_date={result.data_trade_date}")
+        print(f"planned_trade_date={result.plan.planned_trade_date}")
+        print(f"buy_orders={len(result.plan.buy_orders)}")
+        print(f"sell_orders={len(result.plan.sell_orders)}")
+        print(f"hold_orders={len(result.plan.hold_orders)}")
+        print(f"markdown_path={result.plan.markdown_path}")
+        print(f"json_path={result.plan.json_path}")
+        print("feishu=skipped" if result.notification_result is None else f"feishu_status={result.notification_result.status_code}")
         return 0
 
     if args.command == "run-daily":
@@ -524,6 +633,31 @@ def main() -> int:
                 sync_start_date=args.sync_start_date,
                 skip_sync=args.skip_sync,
                 run_on_start=args.run_on_start,
+            )
+        except ModuleNotFoundError as error:
+            _handle_missing_dependency(parser, error)
+        except KeyboardInterrupt:
+            return 130
+        except (RuntimeError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        return 0
+
+    if args.command == "run-tianzhu9-scheduler":
+        try:
+            run_tianzhu9_scheduler(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                run_at=args.run_at,
+                timezone=args.timezone,
+                sync_start_date=args.sync_start_date,
+                skip_sync=args.skip_sync,
+                positions_path=args.positions,
+                run_on_start=args.run_on_start,
+                notify=not args.no_notify,
+                top_n=args.top_n,
+                hold_days=args.hold_days,
+                max_hold_days=args.max_hold_days,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)

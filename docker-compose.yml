@@ -15,3 +15,24 @@ services:
       - --config
       - ${ASHARE_CONFIG:-configs/strategy.toml.example}
     restart: unless-stopped
+
+  ashare-tianzhu9-feishu:
+    build: .
+    image: ashare-signal:latest
+    container_name: ashare-tianzhu9-feishu
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command:
+      - run-tianzhu9-scheduler
+      - --config
+      - ${ASHARE_CONFIG:-configs/strategy.toml.example}
+      - --run-at
+      - ${TIANZHU9_RUN_AT:-18:45}
+      - --positions
+      - data/positions/tianzhu9_positions.csv
+    restart: unless-stopped
