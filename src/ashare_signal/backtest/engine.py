@@ -19,8 +19,8 @@ from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 @dataclass(slots=True)
 class PendingSignal:
     signal_trade_date: str
-    buy_candidate: object | None = None
-    sell_candidate: object | None = None
+    buy_candidates: list[object] | None = None
+    sell_candidates: list[object] | None = None
 
 
 @dataclass(slots=True)
@@ -81,8 +81,8 @@ class BacktestEngine:
         self.base_dir = base_dir
         self.selector = UniverseSignalSelector(
             selection_config=config.selection,
-            top_buy_n=config.strategy.buy_top_n,
-            top_sell_n=config.strategy.sell_top_n,
+            top_buy_n=1000,
+            top_sell_n=1000,
         )
 
     def run(
@@ -127,7 +127,7 @@ class BacktestEngine:
             traded_today = 0.0
             if pending_signal is not None:
                 cash_box = {"cash": cash}
-                traded_today += self._execute_pending_sell(
+                traded_today += self._execute_pending_sells(
                     trade_date=trade_date,
                     trade_index=trade_index,
                     prices=prices,
@@ -136,7 +136,7 @@ class BacktestEngine:
                     trades=trades,
                     cash_ref=cash_box,
                 )
-                traded_today += self._execute_pending_buy(
+                traded_today += self._execute_pending_buys(
                     trade_date=trade_date,
                     trade_index=trade_index,
                     prices=prices,
@@ -156,8 +156,18 @@ class BacktestEngine:
                     "equity": close_equity,
                     "cash": cash,
                     "position_count": len(positions),
-                    "pending_buy": pending_signal.buy_candidate.symbol if pending_signal and pending_signal.buy_candidate else "",
-                    "pending_sell": pending_signal.sell_candidate.symbol if pending_signal and pending_signal.sell_candidate else "",
+                    "pending_buy": ",".join(
+                        candidate.symbol
+                        for candidate in (pending_signal.buy_candidates or [])
+                    )
+                    if pending_signal
+                    else "",
+                    "pending_sell": ",".join(
+                        candidate.symbol
+                        for candidate in (pending_signal.sell_candidates or [])
+                    )
+                    if pending_signal
+                    else "",
                 }
             )
 
@@ -200,40 +210,45 @@ class BacktestEngine:
             ]
             buy_selection = self.selector.select(universe=universe, positions=all_position_models)
             sell_selection = self.selector.select(universe=universe, positions=rotation_positions)
-            forced_sell = self._select_forced_sell(
+            forced_sells = self._select_forced_sells(
                 trade_index=trade_index,
                 universe=universe,
                 prices=prices,
                 positions=positions,
             )
 
-            top_buy = buy_selection.buy_candidates[0] if buy_selection.buy_candidates else None
-            top_sell = sell_selection.sell_candidates[0] if rotation_positions and sell_selection.sell_candidates else None
-            buy_candidate = None
-            sell_candidate = None
-            market_allows_buy = self.selector.market_allows_buy(
-                universe,
-                signal_type=top_buy.signal_type if top_buy else None,
+            buy_candidates = []
+            sell_candidates = []
+            sell_candidates.extend(forced_sells)
+            sell_symbols = {candidate.symbol for candidate in sell_candidates}
+            if rotation_positions:
+                for candidate in sell_selection.sell_candidates:
+                    if candidate.symbol in sell_symbols:
+                        continue
+                    if candidate.score <= self.config.selection.sell_health_exit_threshold:
+                        sell_candidates.append(candidate)
+                        sell_symbols.add(candidate.symbol)
+
+            expected_rebound_positions = sum(
+                1 for position in positions.values() if position.signal_type == "rebound_bottoming"
             )
-            if top_buy is not None and not self._can_add_buy_candidate(top_buy, positions):
-                top_buy = None
-            if forced_sell is not None:
-                sell_candidate = forced_sell
-                if market_allows_buy and self.selector.should_open_new_position(top_buy):
-                    buy_candidate = top_buy
-            elif len(positions) >= self.config.max_positions:
-                if self.selector.should_rotate(top_buy, top_sell):
-                    buy_candidate = top_buy
-                    sell_candidate = top_sell
-            elif market_allows_buy and self.selector.should_open_new_position(top_buy):
-                buy_candidate = top_buy
-            if buy_candidate is not None and buy_candidate.symbol in positions:
-                buy_candidate = None
+            for candidate in buy_selection.buy_candidates:
+                if candidate.symbol in positions or candidate.symbol in sell_symbols:
+                    continue
+                if candidate.signal_type == "rebound_bottoming":
+                    if expected_rebound_positions >= self.config.selection.rebound_max_positions:
+                        continue
+                    expected_rebound_positions += 1
+                if not self.selector.should_open_new_position(candidate):
+                    continue
+                if not self.selector.market_allows_buy(universe, signal_type=candidate.signal_type):
+                    continue
+                buy_candidates.append(candidate)
 
             pending_signal = PendingSignal(
                 signal_trade_date=trade_date,
-                buy_candidate=buy_candidate,
-                sell_candidate=sell_candidate,
+                buy_candidates=buy_candidates,
+                sell_candidates=sell_candidates,
             )
 
         equity_frame = pd.DataFrame(equity_rows)
@@ -322,6 +337,11 @@ class BacktestEngine:
             "down_days_10d",
             "consecutive_down_days",
             "volume_capitulation_score",
+            "industry_member_count",
+            "industry_return_3d_median",
+            "industry_momentum_20d_median",
+            "industry_breadth_20d",
+            "industry_rebound_breadth",
         }
         try:
             universe = self.repository.load_universe_snapshot(trade_date)
@@ -378,15 +398,15 @@ class BacktestEngine:
         )
         return rebound_positions < self.config.selection.rebound_max_positions
 
-    def _select_forced_sell(
+    def _select_forced_sells(
         self,
         trade_index: int,
         universe: pd.DataFrame,
         prices: pd.DataFrame,
         positions: dict[str, BacktestPosition],
-    ):
+    ) -> list[object]:
         if not positions:
-            return None
+            return []
 
         frame = universe.set_index("ts_code")
         candidates = []
@@ -524,18 +544,17 @@ class BacktestEngine:
                     )
                 )
 
-        if not candidates:
-            return None
-
-        priority, pnl_pct, symbol, name, close_price, reason, exit_reason = sorted(candidates)[0]
-        return self._make_sell_candidate(
-            symbol=symbol,
-            name=name,
-            score=float(priority + pnl_pct),
-            reason=reason,
-            last_close=close_price,
-            exit_reason=exit_reason,
-        )
+        return [
+            self._make_sell_candidate(
+                symbol=symbol,
+                name=name,
+                score=float(priority + pnl_pct),
+                reason=reason,
+                last_close=close_price,
+                exit_reason=exit_reason,
+            )
+            for priority, pnl_pct, symbol, name, close_price, reason, exit_reason in sorted(candidates)
+        ]
 
     @staticmethod
     def _make_sell_candidate(symbol: str, name: str, score: float, reason: str, last_close: float, exit_reason: str | None = None):
@@ -551,7 +570,7 @@ class BacktestEngine:
             exit_reason=exit_reason,
         )
 
-    def _execute_pending_sell(
+    def _execute_pending_sells(
         self,
         trade_date: str,
         trade_index: int,
@@ -561,7 +580,31 @@ class BacktestEngine:
         trades: list[BacktestTrade],
         cash_ref: dict[str, float],
     ) -> float:
-        candidate = pending_signal.sell_candidate
+        traded_value = 0.0
+        for candidate in pending_signal.sell_candidates or []:
+            traded_value += self._execute_pending_sell(
+                trade_date=trade_date,
+                trade_index=trade_index,
+                prices=prices,
+                candidate=candidate,
+                signal_trade_date=pending_signal.signal_trade_date,
+                positions=positions,
+                trades=trades,
+                cash_ref=cash_ref,
+            )
+        return traded_value
+
+    def _execute_pending_sell(
+        self,
+        trade_date: str,
+        trade_index: int,
+        prices: pd.DataFrame,
+        candidate: object,
+        signal_trade_date: str,
+        positions: dict[str, BacktestPosition],
+        trades: list[BacktestTrade],
+        cash_ref: dict[str, float],
+    ) -> float:
         if candidate is None or candidate.symbol not in positions:
             return 0.0
 
@@ -595,7 +638,7 @@ class BacktestEngine:
                 gross_amount=gross_amount,
                 fees=fees,
                 net_amount=net_amount,
-                signal_trade_date=pending_signal.signal_trade_date,
+                signal_trade_date=signal_trade_date,
                 signal_type=candidate.signal_type,
                 exit_reason=candidate.exit_reason or "",
                 pnl=pnl,
@@ -604,7 +647,7 @@ class BacktestEngine:
         del positions[position.symbol]
         return gross_amount
 
-    def _execute_pending_buy(
+    def _execute_pending_buys(
         self,
         trade_date: str,
         trade_index: int,
@@ -614,10 +657,32 @@ class BacktestEngine:
         trades: list[BacktestTrade],
         cash_ref: dict[str, float],
     ) -> float:
-        candidate = pending_signal.buy_candidate
+        traded_value = 0.0
+        for candidate in pending_signal.buy_candidates or []:
+            traded_value += self._execute_pending_buy(
+                trade_date=trade_date,
+                trade_index=trade_index,
+                prices=prices,
+                candidate=candidate,
+                signal_trade_date=pending_signal.signal_trade_date,
+                positions=positions,
+                trades=trades,
+                cash_ref=cash_ref,
+            )
+        return traded_value
+
+    def _execute_pending_buy(
+        self,
+        trade_date: str,
+        trade_index: int,
+        prices: pd.DataFrame,
+        candidate: object,
+        signal_trade_date: str,
+        positions: dict[str, BacktestPosition],
+        trades: list[BacktestTrade],
+        cash_ref: dict[str, float],
+    ) -> float:
         if candidate is None or candidate.symbol in positions:
-            return 0.0
-        if len(positions) >= self.config.max_positions:
             return 0.0
         if candidate.symbol not in prices.index:
             return 0.0
@@ -678,7 +743,7 @@ class BacktestEngine:
                 gross_amount=gross_amount,
                 fees=fees,
                 net_amount=net_amount,
-                signal_trade_date=pending_signal.signal_trade_date,
+                signal_trade_date=signal_trade_date,
                 signal_type=candidate.signal_type,
                 exit_reason="",
                 pnl=None,

@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from ashare_signal.backtest.engine import BacktestEngine
+from ashare_signal.backtest.tianzhu9_like import Tianzhu9LikeBacktestEngine
 from ashare_signal.config import load_config, load_env_file
 from ashare_signal.data.repository import DataRepository
 from ashare_signal.portfolio.manager import PortfolioManager
@@ -113,6 +114,67 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Override [backtest].initial_cash for this run",
+    )
+
+    tianzhu9 = subparsers.add_parser(
+        "backtest-tianzhu9",
+        help="Run the Tushare-only Tianzhu9-like daily rank backtest",
+    )
+    tianzhu9.add_argument(
+        "--config",
+        default="configs/strategy.toml.example",
+        help="Path to the TOML config file",
+    )
+    tianzhu9.add_argument(
+        "--start-date",
+        default=None,
+        help="Inclusive backtest start date in ISO format, defaults to about six cached months",
+    )
+    tianzhu9.add_argument(
+        "--end-date",
+        default=None,
+        help="Inclusive backtest end date in ISO format, defaults to latest cached trade date",
+    )
+    tianzhu9.add_argument(
+        "--initial-cash",
+        type=float,
+        default=None,
+        help="Override [backtest].initial_cash for this run",
+    )
+    tianzhu9.add_argument(
+        "--top-n",
+        type=int,
+        default=1,
+        help="Number of top-ranked ChiNext symbols to buy each signal day",
+    )
+    tianzhu9.add_argument(
+        "--hold-days",
+        type=int,
+        default=1,
+        help="Trading days to hold each tranche; 1 means buy open and sell close",
+    )
+    tianzhu9.add_argument(
+        "--max-position-weight",
+        type=float,
+        default=1.0,
+        help="Maximum portfolio weight per symbol",
+    )
+    tianzhu9.add_argument(
+        "--min-avg-amount-yuan",
+        type=float,
+        default=50000000.0,
+        help="Minimum 20-day average turnover in yuan",
+    )
+    tianzhu9.add_argument(
+        "--extend-on-repeat",
+        action="store_true",
+        help="Keep holding a symbol if it remains in the next day's top ranks",
+    )
+    tianzhu9.add_argument(
+        "--max-hold-days",
+        type=int,
+        default=5,
+        help="Maximum hold duration when --extend-on-repeat is enabled",
     )
 
     run_daily = subparsers.add_parser(
@@ -322,6 +384,49 @@ def main() -> int:
         print(f"trade_count={result.trade_count}")
         print(f"win_rate={result.win_rate}")
         print(f"equity_curve_path={result.equity_curve_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "backtest-tianzhu9":
+        try:
+            result = Tianzhu9LikeBacktestEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                top_n=args.top_n,
+                hold_days=args.hold_days,
+                max_position_weight=args.max_position_weight,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                extend_on_repeat=args.extend_on_repeat,
+                max_hold_days=args.max_hold_days,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Tianzhu9-like backtest completed")
+        print(f"start_trade_date={result.start_trade_date}")
+        print(f"end_trade_date={result.end_trade_date}")
+        print(f"signal_lag_days={result.signal_lag_days}")
+        print(f"top_n={result.top_n}")
+        print(f"hold_days={result.hold_days}")
+        print(f"initial_cash={result.initial_cash}")
+        print(f"ending_equity={result.ending_equity}")
+        print(f"total_return={result.total_return}")
+        print(f"annual_return={result.annual_return}")
+        print(f"max_drawdown={result.max_drawdown}")
+        print(f"sharpe={result.sharpe}")
+        print(f"turnover={result.turnover}")
+        print(f"trade_count={result.trade_count}")
+        print(f"sell_trade_count={result.sell_trade_count}")
+        print(f"win_rate={result.win_rate}")
+        print(f"extend_on_repeat={result.extend_on_repeat}")
+        print(f"max_hold_days={result.max_hold_days}")
+        print(f"equity_curve_path={result.equity_curve_path}")
+        print(f"trade_log_path={result.trade_log_path}")
         print(f"summary_path={result.summary_path}")
         return 0
 

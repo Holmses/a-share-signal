@@ -238,6 +238,37 @@ def compute_feature_snapshot(
         how="left",
     )
 
+    industry_pool = snapshot.loc[
+        snapshot["industry"].notna() & snapshot["close"].notna()
+    ].copy()
+    if not industry_pool.empty:
+        industry_pool["_industry_breadth_20d_flag"] = (
+            (industry_pool["close_to_ma_20"] > 0)
+            & (industry_pool["momentum_20d"] > 0)
+        ).astype(float)
+        industry_pool["_industry_rebound_breadth_flag"] = (
+            (industry_pool["return_3d"] > 0)
+            & (industry_pool["low_to_prev_low"] >= 0)
+        ).astype(float)
+        industry_strength = (
+            industry_pool.groupby("industry", dropna=True)
+            .agg(
+                industry_member_count=("ts_code", "count"),
+                industry_return_3d_median=("return_3d", "median"),
+                industry_momentum_20d_median=("momentum_20d", "median"),
+                industry_breadth_20d=("_industry_breadth_20d_flag", "mean"),
+                industry_rebound_breadth=("_industry_rebound_breadth_flag", "mean"),
+            )
+            .reset_index()
+        )
+        snapshot = snapshot.merge(industry_strength, on="industry", how="left")
+    else:
+        snapshot["industry_member_count"] = pd.NA
+        snapshot["industry_return_3d_median"] = pd.NA
+        snapshot["industry_momentum_20d_median"] = pd.NA
+        snapshot["industry_breadth_20d"] = pd.NA
+        snapshot["industry_rebound_breadth"] = pd.NA
+
     if moneyflow is not None and not moneyflow.empty:
         moneyflow_frame = moneyflow.copy()
         moneyflow_frame["trade_date"] = pd.to_datetime(

@@ -67,6 +67,11 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
         "large_net_mf_amount_yuan",
         "net_mf_to_amount",
         "large_net_mf_to_amount",
+        "industry_member_count",
+        "industry_return_3d_median",
+        "industry_momentum_20d_median",
+        "industry_breadth_20d",
+        "industry_rebound_breadth",
         "limit_open_times",
         "limit_up_times",
         "limit_turnover_ratio",
@@ -119,9 +124,15 @@ def _coerce_universe(universe: pd.DataFrame) -> pd.DataFrame:
         "limit_up_times",
         "limit_turnover_ratio",
         "limit_fd_amount",
+        "industry_member_count",
+        "industry_return_3d_median",
+        "industry_momentum_20d_median",
+        "industry_breadth_20d",
+        "industry_rebound_breadth",
     ):
         if column not in frame.columns:
             frame[column] = pd.NA
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     for column in ("is_limit_up", "is_limit_down", "is_limit_intraday"):
         if column not in frame.columns:
             frame[column] = False
@@ -162,7 +173,10 @@ def _rebound_reason(row: pd.Series) -> str:
         f"连续下跌天数 {row['consecutive_down_days']:.0f}，"
         f"较60日均线 {_format_pct(row['close_to_ma_60'])}，"
         f"5日量能比 {row['amount_ratio_5d']:.2f}，"
-        f"大单净流入/成交额 {_format_pct(row.get('large_net_mf_to_amount'))}。"
+        f"大单净流入/成交额 {_format_pct(row.get('large_net_mf_to_amount'))}，"
+        f"行业3日中位收益 {_format_pct(row.get('industry_return_3d_median'))}，"
+        f"行业20日广度 {_format_pct(row.get('industry_breadth_20d'))}，"
+        f"行业反弹广度 {_format_pct(row.get('industry_rebound_breadth'))}。"
     )
 
 
@@ -381,6 +395,26 @@ class UniverseSignalSelector:
             self.selection_config.rebound_min_large_net_mf_to_amount,
             self.selection_config.rebound_prefer_large_net_mf_to_amount,
         )
+        buy_pool["rebound_industry_score"] = (
+            _clip_score(
+                buy_pool["industry_return_3d_median"],
+                self.selection_config.rebound_min_industry_return_3d,
+                self.selection_config.rebound_prefer_industry_return_3d,
+            )
+            * 0.45
+            + _clip_score(
+                buy_pool["industry_breadth_20d"],
+                self.selection_config.rebound_min_industry_breadth_20d,
+                self.selection_config.rebound_prefer_industry_breadth_20d,
+            )
+            * 0.30
+            + _clip_score(
+                buy_pool["industry_rebound_breadth"],
+                self.selection_config.rebound_min_industry_rebound_breadth,
+                self.selection_config.rebound_prefer_industry_rebound_breadth,
+            )
+            * 0.25
+        )
         buy_pool["rebound_heat_penalty"] = (
             _clip_score(
                 buy_pool["return_3d"],
@@ -411,9 +445,10 @@ class UniverseSignalSelector:
         buy_pool["rebound_score"] = (
             buy_pool["rebound_drawdown_score"] * 0.25
             + buy_pool["rebound_depth_control_score"] * 0.20
-            + buy_pool["rebound_stabilization_score"] * 0.25
-            + buy_pool["rebound_liquidity_score"] * 0.15
+            + buy_pool["rebound_stabilization_score"] * 0.22
+            + buy_pool["rebound_liquidity_score"] * 0.13
             + buy_pool["rebound_moneyflow_score"] * 0.10
+            + buy_pool["rebound_industry_score"] * 0.10
             + buy_pool["volume_capitulation_score"].fillna(0.0) * 0.10
             - buy_pool["rebound_heat_penalty"] * 0.20
         )
@@ -421,10 +456,11 @@ class UniverseSignalSelector:
             [
                 "rebound_score",
                 "rebound_stabilization_score",
+                "rebound_industry_score",
                 "volume_capitulation_score",
                 "avg_amount_20d_yuan",
             ],
-            ascending=[False, False, False, False],
+            ascending=[False, False, False, False, False],
         ).head(self.top_buy_n)
         return [
             Candidate(

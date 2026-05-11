@@ -200,10 +200,18 @@ def test_selector_can_pick_bottoming_rebound_candidate() -> None:
             "down_days_10d": 5,
             "consecutive_down_days": 0,
             "volume_capitulation_score": 0.75,
+            "industry_return_3d_median": 0.025,
+            "industry_breadth_20d": 0.55,
+            "industry_rebound_breadth": 0.65,
         }
     )
 
-    selector = UniverseSignalSelector(selection_config=SelectionConfig(rebound_min_score=0.50))
+    selector = UniverseSignalSelector(
+        selection_config=SelectionConfig(
+            enable_rebound_strategy=True,
+            rebound_min_score=0.50,
+        )
+    )
     result = selector.select(universe=pd.DataFrame([rebound]), positions=[])
 
     assert len(result.buy_candidates) == 1
@@ -242,7 +250,12 @@ def test_selector_rejects_unstable_falling_rebound_candidate() -> None:
         }
     )
 
-    selector = UniverseSignalSelector(selection_config=SelectionConfig(rebound_min_score=0.50))
+    selector = UniverseSignalSelector(
+        selection_config=SelectionConfig(
+            enable_rebound_strategy=True,
+            rebound_min_score=0.50,
+        )
+    )
     result = selector.select(universe=pd.DataFrame([falling]), positions=[])
 
     assert result.buy_candidates == []

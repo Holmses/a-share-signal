@@ -181,11 +181,15 @@ def test_compute_feature_snapshot_generates_expected_columns(tmp_path) -> None:
     assert "down_days_10d" in snapshot.columns
     assert "consecutive_down_days" in snapshot.columns
     assert "volume_capitulation_score" in snapshot.columns
+    assert "industry_return_3d_median" in snapshot.columns
+    assert "industry_breadth_20d" in snapshot.columns
+    assert "industry_rebound_breadth" in snapshot.columns
     assert "avg_amount_20d_yuan" in snapshot.columns
     assert "total_mv_yuan" in snapshot.columns
     row = snapshot.loc[snapshot["ts_code"] == "600036.SH"].iloc[0]
     assert bool(row["is_suspended"]) is False
     assert row["avg_amount_20d_yuan"] == 80000000.0
+    assert row["industry_member_count"] == 2
 
 
 def test_apply_universe_filters_marks_non_candidates(tmp_path) -> None:

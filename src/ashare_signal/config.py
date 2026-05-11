@@ -108,6 +108,12 @@ class SelectionConfig:
     rebound_max_volatility_20d: float = 0.08
     rebound_min_large_net_mf_to_amount: float = -0.03
     rebound_prefer_large_net_mf_to_amount: float = 0.02
+    rebound_min_industry_return_3d: float = -0.01
+    rebound_prefer_industry_return_3d: float = 0.03
+    rebound_min_industry_breadth_20d: float = 0.25
+    rebound_prefer_industry_breadth_20d: float = 0.65
+    rebound_min_industry_rebound_breadth: float = 0.25
+    rebound_prefer_industry_rebound_breadth: float = 0.65
     rebound_market_min_breadth: float = 0.25
     rebound_max_positions: int = 2
     rebound_position_size_multiplier: float = 0.50
