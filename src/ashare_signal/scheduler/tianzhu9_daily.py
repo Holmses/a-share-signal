@@ -16,7 +16,7 @@ from ashare_signal.portfolio.tianzhu9_simulator import Tianzhu9PaperBroker, Tian
 from ashare_signal.scheduler.daily import _calendar_end_date, _parse_date, _resolve_sync_start_date, _today
 from ashare_signal.scheduler.daily import next_run_datetime, parse_run_time
 from ashare_signal.strategy.tianzhu9_orders import Tianzhu9OrderPlan, generate_tianzhu9_order_plan
-from ashare_signal.strategy.tianzhu9_orders import plan_to_feishu_text
+from ashare_signal.strategy.tianzhu9_orders import plan_to_feishu_text, render_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
@@ -84,12 +84,14 @@ def run_tianzhu9_daily_workflow(
         hold_days=hold_days,
         max_hold_days=max_hold_days,
     )
-    staged_result = broker.stage_plan(new_plan_path=plan.json_path, as_of_trade_date=data_trade_date)
-    staged_result.executed_trades = simulation_result.executed_trades
-    simulation_result = staged_result
+    broker.stage_plan(new_plan_path=plan.json_path, as_of_trade_date=data_trade_date)
+    plan.markdown_path.write_text(
+        render_tianzhu9_order_plan(plan) + "\n" + render_tianzhu9_simulation_markdown(simulation_result),
+        encoding="utf-8",
+    )
     notification_result = None
     if notify:
-        notification_result = send_tianzhu9_plan_to_feishu(plan)
+        notification_result = send_tianzhu9_plan_to_feishu(plan, simulation_result)
     return Tianzhu9DailyResult(
         sync_result=sync_result,
         data_trade_date=data_trade_date,
@@ -99,12 +101,91 @@ def run_tianzhu9_daily_workflow(
     )
 
 
-def send_tianzhu9_plan_to_feishu(plan: Tianzhu9OrderPlan) -> FeishuSendResult | None:
+def send_tianzhu9_plan_to_feishu(
+    plan: Tianzhu9OrderPlan,
+    simulation_result: Tianzhu9SimulationResult,
+) -> FeishuSendResult | None:
     webhook = os.getenv("FEISHU_WEBHOOK", "").strip()
     if not webhook:
         return None
     secret = os.getenv("FEISHU_SECRET", "").strip() or None
-    return FeishuWebhookNotifier(webhook_url=webhook, secret=secret).send_text(plan_to_feishu_text(plan))
+    text = plan_to_feishu_text(plan) + "\n\n" + simulation_to_feishu_text(simulation_result)
+    return FeishuWebhookNotifier(webhook_url=webhook, secret=secret).send_text(text)
+
+
+def simulation_to_feishu_text(result: Tianzhu9SimulationResult) -> str:
+    lines = [
+        "模拟账户:",
+        f"- 运行时间: {result.updated_at}",
+        f"- 数据日: {format_trade_date(result.last_trade_date)}",
+        f"- 初始资金: {format_money(result.initial_cash)}",
+        f"- 总资产: {format_money(result.equity)}",
+        f"- 现金: {format_money(result.cash)}",
+        f"- 持仓市值: {format_money(result.positions_market_value)}",
+        f"- 当日盈亏: {format_signed_money(result.daily_pnl)} ({format_pct(result.daily_return)})",
+        f"- 总收益率: {format_pct(result.total_return)}",
+        f"- 持仓数: {result.positions_count}",
+        f"- 本次模拟成交: {result.executed_trades}",
+    ]
+    lines.append("")
+    lines.append("持仓浮盈亏:")
+    if not result.positions:
+        lines.append("- 无")
+    for position in result.positions[:8]:
+        lines.append(
+            f"- {position.symbol} {position.name} "
+            f"数量:{position.quantity} 现价:{position.last_price:.2f} "
+            f"市值:{format_money(position.market_value)} "
+            f"浮盈亏:{format_signed_money(position.unrealized_pnl)} ({format_pct(position.unrealized_return)}) "
+            f"持有:{position.holding_days}天"
+        )
+    return "\n".join(lines)
+
+
+def render_tianzhu9_simulation_markdown(result: Tianzhu9SimulationResult) -> str:
+    lines = [
+        "## 模拟账户",
+        "",
+        f"- 运行时间：{result.updated_at}",
+        f"- 数据日：{format_trade_date(result.last_trade_date)}",
+        f"- 初始资金：{format_money(result.initial_cash)}",
+        f"- 总资产：{format_money(result.equity)}",
+        f"- 现金：{format_money(result.cash)}",
+        f"- 持仓市值：{format_money(result.positions_market_value)}",
+        f"- 当日盈亏：{format_signed_money(result.daily_pnl)}（{format_pct(result.daily_return)}）",
+        f"- 总收益率：{format_pct(result.total_return)}",
+        f"- 持仓数：{result.positions_count}",
+        f"- 本次模拟成交：{result.executed_trades}",
+        "",
+        "## 持仓浮盈亏",
+    ]
+    if not result.positions:
+        lines.append("无持仓。")
+    for position in result.positions:
+        lines.append(
+            f"- {position.symbol} {position.name}，数量：{position.quantity}，"
+            f"成本：{position.entry_price:.2f}，现价：{position.last_price:.2f}，"
+            f"市值：{format_money(position.market_value)}，"
+            f"浮盈亏：{format_signed_money(position.unrealized_pnl)}（{format_pct(position.unrealized_return)}），"
+            f"持有：{position.holding_days}天"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def format_money(value: float) -> str:
+    return f"{value:,.2f}"
+
+
+def format_signed_money(value: float) -> str:
+    return f"{value:+,.2f}"
+
+
+def format_pct(value: float) -> str:
+    return f"{value:+.2%}"
+
+
+def format_trade_date(value: str) -> str:
+    return f"{value[:4]}-{value[4:6]}-{value[6:]}" if len(value) == 8 and value.isdigit() else value
 
 
 def run_tianzhu9_scheduler(
@@ -150,6 +231,9 @@ def run_tianzhu9_scheduler(
         print(f"sim_positions={result.simulation_result.positions_count}", flush=True)
         print(f"sim_cash={result.simulation_result.cash}", flush=True)
         print(f"sim_equity={result.simulation_result.equity}", flush=True)
+        print(f"sim_daily_pnl={result.simulation_result.daily_pnl}", flush=True)
+        print(f"sim_total_return={result.simulation_result.total_return}", flush=True)
+        print(f"sim_updated_at={result.simulation_result.updated_at}", flush=True)
         print(f"sim_executed_trades={result.simulation_result.executed_trades}", flush=True)
         if result.notification_result is None:
             print("feishu=skipped", flush=True)

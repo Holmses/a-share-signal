@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 import json
 import math
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -13,16 +14,40 @@ from ashare_signal.data.repository import DataRepository
 
 
 @dataclass(slots=True)
+class Tianzhu9PositionSnapshot:
+    symbol: str
+    name: str
+    entry_date: str
+    entry_price: float
+    quantity: int
+    last_price: float
+    market_value: float
+    cost_basis: float
+    unrealized_pnl: float
+    unrealized_return: float
+    holding_days: int
+
+
+@dataclass(slots=True)
 class Tianzhu9SimulationResult:
     positions_path: Path
     state_path: Path
     trades_path: Path
     pending_plan_path: Path
+    initial_cash: float
     cash: float
     equity: float
+    previous_equity: float
+    positions_market_value: float
+    daily_pnl: float
+    daily_return: float
+    total_return: float
     positions_count: int
     executed_trades: int
     pending_plan_date: str | None
+    last_trade_date: str
+    updated_at: str
+    positions: list[Tianzhu9PositionSnapshot]
 
 
 class Tianzhu9PaperBroker:
@@ -68,6 +93,8 @@ class Tianzhu9PaperBroker:
         positions = self._load_positions()
         state = self._load_state()
         self._write_pending_plan(new_plan_path)
+        if "equity" in state:
+            return self._result_from_state(state, positions, executed_trades=0)
         return self._save_and_result(state, positions, [], as_of_trade_date)
 
     def settle_and_stage_plan(self, new_plan_path: Path, as_of_trade_date: str) -> Tianzhu9SimulationResult:
@@ -81,28 +108,62 @@ class Tianzhu9PaperBroker:
         trades: list[dict],
         as_of_trade_date: str,
     ) -> Tianzhu9SimulationResult:
-        equity = self._mark_to_market(float(state["cash"]), positions, as_of_trade_date)
+        previous_equity = float(state.get("equity") or state["initial_cash"])
+        snapshots = self._position_snapshots(positions, as_of_trade_date)
+        positions_market_value = sum(snapshot.market_value for snapshot in snapshots)
+        equity = float(state["cash"]) + positions_market_value
+        initial_cash = float(state["initial_cash"])
+        updated_at = self._now_iso()
         state.update(
             {
-                "initial_cash": float(state["initial_cash"]),
+                "initial_cash": initial_cash,
                 "cash": float(state["cash"]),
                 "equity": equity,
+                "previous_equity": previous_equity,
+                "positions_market_value": positions_market_value,
+                "daily_pnl": equity - previous_equity,
+                "daily_return": (equity / previous_equity - 1.0) if previous_equity else 0.0,
+                "total_return": (equity / initial_cash - 1.0) if initial_cash else 0.0,
                 "last_trade_date": as_of_trade_date,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "updated_at": updated_at,
+                "positions": [asdict(snapshot) for snapshot in snapshots],
             }
         )
         self._save_state(state)
+        return self._result_from_state(state, positions, executed_trades=len(trades))
+
+    def _result_from_state(
+        self,
+        state: dict,
+        positions: list[dict],
+        executed_trades: int,
+    ) -> Tianzhu9SimulationResult:
         staged = self._load_pending_plan()
+        snapshots = [
+            Tianzhu9PositionSnapshot(**snapshot)
+            for snapshot in state.get("positions", [])
+        ]
+        if not snapshots and positions:
+            snapshots = self._position_snapshots(positions, str(state.get("last_trade_date") or ""))
         return Tianzhu9SimulationResult(
             positions_path=self.positions_path,
             state_path=self.state_path,
             trades_path=self.trades_path,
             pending_plan_path=self.pending_plan_path,
+            initial_cash=float(state["initial_cash"]),
             cash=float(state["cash"]),
-            equity=equity,
+            equity=float(state["equity"]),
+            previous_equity=float(state.get("previous_equity") or state["initial_cash"]),
+            positions_market_value=float(state.get("positions_market_value") or 0.0),
+            daily_pnl=float(state.get("daily_pnl") or 0.0),
+            daily_return=float(state.get("daily_return") or 0.0),
+            total_return=float(state.get("total_return") or 0.0),
             positions_count=len(positions),
-            executed_trades=len(trades),
+            executed_trades=executed_trades,
             pending_plan_date=str(staged["planned_trade_date"]) if staged else None,
+            last_trade_date=str(state.get("last_trade_date") or ""),
+            updated_at=str(state.get("updated_at") or ""),
+            positions=snapshots,
         )
 
     def _load_state(self) -> dict:
@@ -116,6 +177,13 @@ class Tianzhu9PaperBroker:
 
     def _save_state(self, state: dict) -> None:
         self.state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _now_iso(self) -> str:
+        timezone = getattr(getattr(self.config, "runtime", None), "timezone", None) or "Asia/Shanghai"
+        try:
+            return datetime.now(ZoneInfo(timezone)).isoformat(timespec="seconds")
+        except Exception:
+            return datetime.now().isoformat(timespec="seconds")
 
     def _load_positions(self) -> list[dict]:
         if not self.positions_path.exists():
@@ -338,18 +406,49 @@ class Tianzhu9PaperBroker:
                 continue
             position["highest_close"] = max(float(position.get("highest_close") or 0.0), close_price)
 
-    def _mark_to_market(self, cash: float, positions: list[dict], trade_date: str) -> float:
-        equity = cash
+    def _position_snapshots(self, positions: list[dict], trade_date: str) -> list[Tianzhu9PositionSnapshot]:
         try:
             prices = self.repository.load_daily(trade_date).set_index("ts_code")
         except FileNotFoundError:
-            return equity + sum(float(position["entry_price"]) * int(position["quantity"]) for position in positions)
+            prices = pd.DataFrame()
+        snapshots = []
         for position in positions:
             symbol = position["symbol"]
             price = float(position["entry_price"])
-            if symbol in prices.index:
+            if not prices.empty and symbol in prices.index:
                 close_price = float(prices.loc[symbol, "close"])
                 if not math.isnan(close_price) and close_price > 0:
                     price = close_price
-            equity += price * int(position["quantity"])
-        return equity
+            quantity = int(position["quantity"])
+            entry_price = float(position["entry_price"])
+            market_value = price * quantity
+            cost_basis = entry_price * quantity
+            unrealized_pnl = market_value - cost_basis
+            snapshots.append(
+                Tianzhu9PositionSnapshot(
+                    symbol=symbol,
+                    name=str(position["name"]),
+                    entry_date=str(position["entry_date"]),
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    last_price=price,
+                    market_value=market_value,
+                    cost_basis=cost_basis,
+                    unrealized_pnl=unrealized_pnl,
+                    unrealized_return=(price / entry_price - 1.0) if entry_price else 0.0,
+                    holding_days=self._holding_days(str(position["entry_date"]), trade_date),
+                )
+            )
+        return snapshots
+
+    def _holding_days(self, entry_date: str, trade_date: str) -> int:
+        if len(entry_date) == 10 and "-" in entry_date:
+            compact_entry = entry_date.replace("-", "")
+        else:
+            compact_entry = entry_date
+        try:
+            start = datetime.strptime(compact_entry, "%Y%m%d").date()
+            end = datetime.strptime(trade_date, "%Y%m%d").date()
+        except ValueError:
+            return 1
+        return max((end - start).days + 1, 1)
