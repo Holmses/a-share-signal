@@ -285,5 +285,11 @@ class DataRepository:
     def daily_basic_cache_exists(self, trade_date: str) -> bool:
         return (self.tushare_root / "daily_basic" / f"{trade_date}.csv").exists()
 
+    def moneyflow_cache_exists(self, trade_date: str) -> bool:
+        return (self.tushare_root / "moneyflow" / f"{trade_date}.csv").exists()
+
+    def limit_list_cache_exists(self, trade_date: str) -> bool:
+        return (self.tushare_root / "limit_list" / f"{trade_date}.csv").exists()
+
     def normalize_trade_date(self, value: str) -> str:
         return to_compact_date(value)

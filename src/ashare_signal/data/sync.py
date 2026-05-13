@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.data.tushare_client import TushareClient
+from ashare_signal.data.tushare_client import TushareClient, TushareTransientError
 from ashare_signal.utils.dates import to_compact_date
 
 
@@ -59,23 +59,46 @@ class TushareSyncService:
         moneyflow_files = 0
         limit_list_files = 0
         for trade_date in open_dates:
-            daily = self.client.fetch_daily(trade_date=trade_date)
-            if not daily.empty:
-                self.repository.save_daily(trade_date, daily)
-                daily_files += 1
+            daily_exists = self.repository.daily_cache_exists(trade_date)
+            daily_basic_exists = self.repository.daily_basic_cache_exists(trade_date)
+            limit_list_exists = self.repository.limit_list_cache_exists(trade_date)
 
-            daily_basic = self.client.fetch_daily_basic(trade_date=trade_date)
-            if not daily_basic.empty:
-                self.repository.save_daily_basic(trade_date, daily_basic)
-                daily_basic_files += 1
+            if daily_exists and daily_basic_exists:
+                try:
+                    daily = self.client.fetch_daily(trade_date=trade_date)
+                    if not daily.empty:
+                        self.repository.save_daily(trade_date, daily)
+                        daily_files += 1
 
-            moneyflow = self.client.fetch_moneyflow(trade_date=trade_date)
-            if not moneyflow.empty:
+                    daily_basic = self.client.fetch_daily_basic(trade_date=trade_date)
+                    if not daily_basic.empty:
+                        self.repository.save_daily_basic(trade_date, daily_basic)
+                        daily_basic_files += 1
+                except TushareTransientError:
+                    pass
+            else:
+                daily = self.client.fetch_daily(trade_date=trade_date)
+                if not daily.empty:
+                    self.repository.save_daily(trade_date, daily)
+                    daily_files += 1
+
+                daily_basic = self.client.fetch_daily_basic(trade_date=trade_date)
+                if not daily_basic.empty:
+                    self.repository.save_daily_basic(trade_date, daily_basic)
+                    daily_basic_files += 1
+
+            try:
+                moneyflow = self.client.fetch_moneyflow(trade_date=trade_date)
+            except TushareTransientError:
+                moneyflow = None
+            if moneyflow is not None and not moneyflow.empty:
                 self.repository.save_moneyflow(trade_date, moneyflow)
                 moneyflow_files += 1
 
             try:
                 limit_list = self.client.fetch_limit_list(trade_date=trade_date)
+            except TushareTransientError:
+                limit_list = None if limit_list_exists else self.client.fetch_limit_list(trade_date=trade_date)
             except Exception:
                 limit_list = None
             if limit_list is not None and not limit_list.empty:

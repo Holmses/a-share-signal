@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import TYPE_CHECKING
 
 from ashare_signal.utils.dates import to_compact_date
@@ -9,11 +10,46 @@ if TYPE_CHECKING:
     import pandas as pd
 
 
+class TushareTransientError(RuntimeError):
+    """Raised when a retryable Tushare request keeps failing."""
+
+
+def _transient_exception_types() -> tuple[type[BaseException], ...]:
+    exception_types: list[type[BaseException]] = [TimeoutError]
+    try:
+        from requests import exceptions as requests_exceptions
+
+        exception_types.extend(
+            [
+                requests_exceptions.Timeout,
+                requests_exceptions.ConnectionError,
+            ]
+        )
+    except Exception:  # pragma: no cover - optional import guard
+        pass
+
+    try:
+        from urllib3 import exceptions as urllib3_exceptions
+
+        exception_types.extend(
+            [
+                urllib3_exceptions.TimeoutError,
+                urllib3_exceptions.ProtocolError,
+            ]
+        )
+    except Exception:  # pragma: no cover - optional import guard
+        pass
+
+    return tuple(exception_types)
+
+
 @dataclass(slots=True)
 class TushareClient:
     """Thin wrapper around the Tushare Pro client."""
 
     token: str | None
+    max_attempts: int = 3
+    retry_sleep_seconds: float = 2.0
 
     def is_configured(self) -> bool:
         return bool(self.token)
@@ -28,13 +64,29 @@ class TushareClient:
         self.require_token()
         return ts.pro_api(self.token)
 
+    def _query(self, api_name: str, **kwargs) -> "pd.DataFrame":
+        attempts = max(int(self.max_attempts), 1)
+        transient_exceptions = _transient_exception_types()
+        for attempt in range(1, attempts + 1):
+            try:
+                return getattr(self._pro(), api_name)(**kwargs)
+            except transient_exceptions as error:
+                if attempt >= attempts:
+                    raise TushareTransientError(
+                        f"Tushare {api_name} request failed after {attempts} attempts: {error}"
+                    ) from error
+                time.sleep(max(float(self.retry_sleep_seconds), 0.0) * attempt)
+
+        raise RuntimeError("unreachable")
+
     def fetch_trade_calendar(
         self,
         start_date: str,
         end_date: str,
         exchange: str = "SSE",
     ) -> "pd.DataFrame":
-        return self._pro().trade_cal(
+        return self._query(
+            "trade_cal",
             exchange=exchange,
             start_date=to_compact_date(start_date),
             end_date=to_compact_date(end_date),
@@ -45,7 +97,8 @@ class TushareClient:
         self,
         list_status: str = "L",
     ) -> "pd.DataFrame":
-        return self._pro().stock_basic(
+        return self._query(
+            "stock_basic",
             exchange="",
             list_status=list_status,
             fields=(
@@ -55,7 +108,8 @@ class TushareClient:
         )
 
     def fetch_daily(self, trade_date: str) -> "pd.DataFrame":
-        return self._pro().daily(
+        return self._query(
+            "daily",
             trade_date=to_compact_date(trade_date),
             fields=(
                 "ts_code,trade_date,open,high,low,close,pre_close,"
@@ -64,7 +118,8 @@ class TushareClient:
         )
 
     def fetch_daily_basic(self, trade_date: str) -> "pd.DataFrame":
-        return self._pro().daily_basic(
+        return self._query(
+            "daily_basic",
             trade_date=to_compact_date(trade_date),
             fields=(
                 "ts_code,trade_date,close,turnover_rate,turnover_rate_f,volume_ratio,"
@@ -74,7 +129,8 @@ class TushareClient:
         )
 
     def fetch_moneyflow(self, trade_date: str) -> "pd.DataFrame":
-        return self._pro().moneyflow(
+        return self._query(
+            "moneyflow",
             trade_date=to_compact_date(trade_date),
             fields=(
                 "ts_code,trade_date,buy_lg_amount,sell_lg_amount,"
@@ -83,7 +139,8 @@ class TushareClient:
         )
 
     def fetch_limit_list(self, trade_date: str) -> "pd.DataFrame":
-        return self._pro().limit_list_d(
+        return self._query(
+            "limit_list_d",
             trade_date=to_compact_date(trade_date),
             fields=(
                 "trade_date,ts_code,industry,name,pct_chg,amount,limit_amount,"
