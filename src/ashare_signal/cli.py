@@ -573,6 +573,11 @@ def main() -> int:
         print(f"hold_orders={len(result.plan.hold_orders)}")
         print(f"markdown_path={result.plan.markdown_path}")
         print(f"json_path={result.plan.json_path}")
+        print(f"sim_positions={result.simulation_result.positions_count}")
+        print(f"sim_cash={result.simulation_result.cash}")
+        print(f"sim_equity={result.simulation_result.equity}")
+        print(f"sim_executed_trades={result.simulation_result.executed_trades}")
+        print(f"sim_positions_path={result.simulation_result.positions_path}")
         print("feishu=skipped" if result.notification_result is None else f"feishu_status={result.notification_result.status_code}")
         return 0
 

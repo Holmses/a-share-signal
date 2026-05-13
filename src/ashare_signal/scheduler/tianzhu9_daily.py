@@ -12,6 +12,7 @@ from ashare_signal.data.repository import DataRepository
 from ashare_signal.data.sync import SyncResult, TushareSyncService
 from ashare_signal.data.tushare_client import TushareClient
 from ashare_signal.notify.feishu import FeishuSendResult, FeishuWebhookNotifier
+from ashare_signal.portfolio.tianzhu9_simulator import Tianzhu9PaperBroker, Tianzhu9SimulationResult
 from ashare_signal.scheduler.daily import _calendar_end_date, _parse_date, _resolve_sync_start_date, _today
 from ashare_signal.scheduler.daily import next_run_datetime, parse_run_time
 from ashare_signal.strategy.tianzhu9_orders import Tianzhu9OrderPlan, generate_tianzhu9_order_plan
@@ -24,6 +25,7 @@ class Tianzhu9DailyResult:
     sync_result: SyncResult | None
     data_trade_date: str
     plan: Tianzhu9OrderPlan
+    simulation_result: Tianzhu9SimulationResult
     notification_result: FeishuSendResult | None
 
 
@@ -63,6 +65,15 @@ def run_tianzhu9_daily_workflow(
     if data_trade_date is None:
         raise ValueError("No complete daily and daily_basic cache is available for Tianzhu9 orders.")
 
+    broker = Tianzhu9PaperBroker(
+        config=config,
+        repository=repository,
+        base_dir=base_dir,
+        hold_days=hold_days,
+        positions_path=base_dir / positions_path if positions_path else None,
+    )
+    simulation_result = broker.settle_pending_plan(as_of_trade_date=data_trade_date)
+
     plan = generate_tianzhu9_order_plan(
         config=config,
         repository=repository,
@@ -73,6 +84,9 @@ def run_tianzhu9_daily_workflow(
         hold_days=hold_days,
         max_hold_days=max_hold_days,
     )
+    staged_result = broker.stage_plan(new_plan_path=plan.json_path, as_of_trade_date=data_trade_date)
+    staged_result.executed_trades = simulation_result.executed_trades
+    simulation_result = staged_result
     notification_result = None
     if notify:
         notification_result = send_tianzhu9_plan_to_feishu(plan)
@@ -80,6 +94,7 @@ def run_tianzhu9_daily_workflow(
         sync_result=sync_result,
         data_trade_date=data_trade_date,
         plan=plan,
+        simulation_result=simulation_result,
         notification_result=notification_result,
     )
 
@@ -132,6 +147,10 @@ def run_tianzhu9_scheduler(
         print(f"sell_orders={len(result.plan.sell_orders)}", flush=True)
         print(f"hold_orders={len(result.plan.hold_orders)}", flush=True)
         print(f"markdown_path={result.plan.markdown_path}", flush=True)
+        print(f"sim_positions={result.simulation_result.positions_count}", flush=True)
+        print(f"sim_cash={result.simulation_result.cash}", flush=True)
+        print(f"sim_equity={result.simulation_result.equity}", flush=True)
+        print(f"sim_executed_trades={result.simulation_result.executed_trades}", flush=True)
         if result.notification_result is None:
             print("feishu=skipped", flush=True)
         else:
