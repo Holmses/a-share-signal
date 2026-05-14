@@ -24,6 +24,12 @@ class Tianzhu9Order:
     rank: int | None
     score: float | None
     reason: str
+    entry_price: float | None = None
+    last_price: float | None = None
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    unrealized_return: float | None = None
+    holding_days: int | None = None
 
 
 @dataclass(slots=True)
@@ -72,6 +78,7 @@ def generate_tianzhu9_order_plan(
     factor_frame = engine._build_factor_frame(feature_dates)
     selected = engine._select_candidates(factor_frame, signal_trade_date)
     selected_symbols = {row["ts_code"] for row in selected}
+    selected_by_symbol = {str(row["ts_code"]): row for row in selected}
 
     positions = _load_tianzhu9_positions(positions_path or _default_positions_path(base_dir))
     buy_orders = _build_buy_orders(
@@ -84,6 +91,7 @@ def generate_tianzhu9_order_plan(
         factor_frame=factor_frame,
         signal_trade_date=signal_trade_date,
         selected_symbols=selected_symbols,
+        selected_by_symbol=selected_by_symbol,
         positions=positions,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
@@ -126,11 +134,11 @@ def render_tianzhu9_order_plan(plan: Tianzhu9OrderPlan) -> str:
         "",
         "## 买入计划",
     ]
-    lines.extend(_render_order_lines(plan.buy_orders, empty="无买入计划。"))
+    lines.extend(_render_buy_order_table(plan.buy_orders, empty="无买入计划。"))
     lines.extend(["", "## 卖出计划"])
-    lines.extend(_render_order_lines(plan.sell_orders, empty="无卖出计划。"))
+    lines.extend(_render_sell_order_table(plan.sell_orders, empty="无卖出计划。"))
     lines.extend(["", "## 继续持有"])
-    lines.extend(_render_order_lines(plan.hold_orders, empty="无继续持有。"))
+    lines.extend(_render_hold_order_table(plan.hold_orders, empty="无继续持有。"))
     if plan.notes:
         lines.extend(["", "## 备注"])
         lines.extend(f"- {note}" for note in plan.notes)
@@ -151,10 +159,7 @@ def plan_to_feishu_text(plan: Tianzhu9OrderPlan) -> str:
             lines.append("- 无")
             continue
         for order in orders[:8]:
-            price = "观察" if order.limit_price is None else f"{order.limit_price:.2f}"
-            rank = "-" if order.rank is None else str(order.rank)
-            score = "-" if order.score is None else f"{order.score:.4f}"
-            lines.append(f"- {order.symbol} {order.name} 价:{price} rank:{rank} score:{score}")
+            lines.append(f"- {_render_order_text_line(order)}")
             lines.append(f"  {order.reason}")
     if plan.notes:
         lines.append("")
@@ -195,6 +200,7 @@ def _build_position_orders(
     factor_frame: pd.DataFrame,
     signal_trade_date: str,
     selected_symbols: set[str],
+    selected_by_symbol: dict[str, dict],
     positions: list[dict],
     hold_days: int,
     max_hold_days: int,
@@ -204,18 +210,35 @@ def _build_position_orders(
     signal_day = parse_compact_date(signal_trade_date)
     for position in positions:
         symbol = str(position["symbol"])
+        quantity = int(position["quantity"])
+        entry_price = float(position["entry_price"])
+        entry_date = date.fromisoformat(_normalize_iso_date(str(position["entry_date"])))
+        holding_days = max((signal_day - entry_date).days + 1, 1)
+        selected_row = selected_by_symbol.get(symbol)
+        rank = int(selected_row["rank"]) if selected_row is not None else None
+        score = float(selected_row["score"]) if selected_row is not None else None
         feature = Tianzhu9LikeBacktestEngine._feature_row(factor_frame, signal_trade_date, symbol)
         if feature is None:
-            hold_orders.append(_position_order("HOLD", position, None, "持仓标的未出现在今日候选特征中，暂按观察处理。"))
+            hold_orders.append(
+                _position_order(
+                    "HOLD",
+                    position,
+                    None,
+                    "持仓标的未出现在今日候选特征中，暂按观察处理。",
+                    rank=rank,
+                    score=score,
+                    holding_days=holding_days,
+                )
+            )
             continue
 
         prev_close = float(feature["close"])
         ma_5 = float(feature["ma_5"])
         ma_10 = float(feature["ma_10"])
-        entry_price = float(position["entry_price"])
         highest_close = float(position.get("highest_close") or max(prev_close, entry_price))
-        entry_date = date.fromisoformat(_normalize_iso_date(str(position["entry_date"])))
-        holding_days = max((signal_day - entry_date).days + 1, 1)
+        market_value = prev_close * quantity
+        unrealized_pnl = market_value - entry_price * quantity
+        unrealized_return = (prev_close / entry_price - 1.0) if entry_price else None
         pnl_pct = prev_close / entry_price - 1.0
         high_profit_pct = highest_close / entry_price - 1.0
         drawdown_from_high = prev_close / highest_close - 1.0 if highest_close else 0.0
@@ -234,13 +257,41 @@ def _build_position_orders(
 
         if reason:
             limit_price = round(prev_close * (1 - config.pricing.sell_markdown), 2)
-            sell_orders.append(_position_order("SELL", position, limit_price, reason))
+            sell_orders.append(
+                _position_order(
+                    "SELL",
+                    position,
+                    limit_price,
+                    reason,
+                    rank=rank,
+                    score=score,
+                    last_price=prev_close,
+                    market_value=market_value,
+                    unrealized_pnl=unrealized_pnl,
+                    unrealized_return=unrealized_return,
+                    holding_days=holding_days,
+                )
+            )
         else:
             if symbol in selected_symbols:
                 reason = f"重复入选，未达到最长持有 {max_hold_days} 天。"
             else:
                 reason = f"未触发止损/止盈/均线退出，当前持有 {holding_days} 天。"
-            hold_orders.append(_position_order("HOLD", position, None, reason))
+            hold_orders.append(
+                _position_order(
+                    "HOLD",
+                    position,
+                    None,
+                    reason,
+                    rank=rank,
+                    score=score,
+                    last_price=prev_close,
+                    market_value=market_value,
+                    unrealized_pnl=unrealized_pnl,
+                    unrealized_return=unrealized_return,
+                    holding_days=holding_days,
+                )
+            )
     return sell_orders, hold_orders
 
 
@@ -266,31 +317,174 @@ def _load_tianzhu9_positions(path: Path) -> list[dict]:
     return rows
 
 
-def _position_order(action: str, position: dict, limit_price: float | None, reason: str) -> Tianzhu9Order:
+def _position_order(
+    action: str,
+    position: dict,
+    limit_price: float | None,
+    reason: str,
+    *,
+    rank: int | None = None,
+    score: float | None = None,
+    last_price: float | None = None,
+    market_value: float | None = None,
+    unrealized_pnl: float | None = None,
+    unrealized_return: float | None = None,
+    holding_days: int | None = None,
+) -> Tianzhu9Order:
     return Tianzhu9Order(
         action=action,
         symbol=str(position["symbol"]),
         name=str(position["name"]),
         limit_price=limit_price,
         quantity=int(position["quantity"]),
-        rank=None,
-        score=None,
+        rank=rank,
+        score=score,
         reason=reason,
+        entry_price=float(position["entry_price"]),
+        last_price=last_price,
+        market_value=market_value,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_return=unrealized_return,
+        holding_days=holding_days,
     )
 
 
-def _render_order_lines(orders: list[Tianzhu9Order], empty: str) -> list[str]:
+def _render_buy_order_table(orders: list[Tianzhu9Order], empty: str) -> list[str]:
     if not orders:
         return [empty]
-    lines = []
-    for order in orders:
-        price = "观察" if order.limit_price is None else f"{order.limit_price:.2f}"
-        quantity = "-" if order.quantity is None else str(order.quantity)
-        rank = "-" if order.rank is None else str(order.rank)
-        score = "-" if order.score is None else f"{order.score:.4f}"
-        lines.append(f"- {order.symbol} {order.name}，价格：{price}，数量：{quantity}，rank：{rank}，score：{score}")
-        lines.append(f"  - {order.reason}")
+    rows = [
+        [
+            order.symbol,
+            order.name,
+            _format_price(order.limit_price, default="观察"),
+            _format_rank(order.rank),
+            _format_score(order.score),
+            order.reason,
+        ]
+        for order in orders
+    ]
+    return _render_markdown_table(["代码", "名称", "计划买入价", "rank", "score", "原因"], rows)
+
+
+def _render_sell_order_table(orders: list[Tianzhu9Order], empty: str) -> list[str]:
+    if not orders:
+        return [empty]
+    rows = [
+        [
+            order.symbol,
+            order.name,
+            _format_quantity(order.quantity),
+            _format_price(order.entry_price),
+            _format_price(order.last_price),
+            _format_price(order.limit_price),
+            _format_signed_money(order.unrealized_pnl),
+            _format_pct(order.unrealized_return),
+            _format_holding_days(order.holding_days),
+            order.reason,
+        ]
+        for order in orders
+    ]
+    return _render_markdown_table(
+        ["代码", "名称", "数量", "买入价", "现价", "计划卖价", "浮盈亏", "收益率", "持有天数", "原因"],
+        rows,
+    )
+
+
+def _render_hold_order_table(orders: list[Tianzhu9Order], empty: str) -> list[str]:
+    if not orders:
+        return [empty]
+    rows = [
+        [
+            order.symbol,
+            order.name,
+            _format_quantity(order.quantity),
+            _format_price(order.entry_price),
+            _format_price(order.last_price),
+            _format_money(order.market_value),
+            _format_signed_money(order.unrealized_pnl),
+            _format_pct(order.unrealized_return),
+            _format_holding_days(order.holding_days),
+            _format_rank(order.rank),
+            _format_score(order.score),
+            order.reason,
+        ]
+        for order in orders
+    ]
+    return _render_markdown_table(
+        ["代码", "名称", "数量", "买入价", "现价", "市值", "浮盈亏", "收益率", "持有天数", "rank", "score", "原因"],
+        rows,
+    )
+
+
+def _render_order_text_line(order: Tianzhu9Order) -> str:
+    parts = [f"{order.symbol} {order.name}"]
+    if order.action == "BUY":
+        parts.append(f"价:{_format_price(order.limit_price, default='观察')}")
+    elif order.action == "SELL":
+        parts.append(f"卖价:{_format_price(order.limit_price, default='观察')}")
+    if order.quantity is not None:
+        parts.append(f"数量:{order.quantity}")
+    if order.entry_price is not None:
+        parts.append(f"买入:{order.entry_price:.2f}")
+    if order.last_price is not None:
+        parts.append(f"现价:{order.last_price:.2f}")
+    if order.unrealized_pnl is not None:
+        parts.append(
+            f"浮盈亏:{_format_signed_money(order.unrealized_pnl)} ({_format_pct(order.unrealized_return)})"
+        )
+    if order.holding_days is not None:
+        parts.append(f"持有:{order.holding_days}天")
+    if order.rank is not None:
+        parts.append(f"rank:{order.rank}")
+    if order.score is not None:
+        parts.append(f"score:{order.score:.4f}")
+    return " ".join(parts)
+
+
+def _render_markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_escape_markdown_cell(cell) for cell in row) + " |")
     return lines
+
+
+def _escape_markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _format_price(value: float | None, default: str = "-") -> str:
+    return default if value is None else f"{value:.2f}"
+
+
+def _format_money(value: float | None) -> str:
+    return "-" if value is None else f"{value:,.2f}"
+
+
+def _format_signed_money(value: float | None) -> str:
+    return "-" if value is None else f"{value:+,.2f}"
+
+
+def _format_pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:+.2%}"
+
+
+def _format_quantity(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+def _format_holding_days(value: int | None) -> str:
+    return "-" if value is None else f"{value}天"
+
+
+def _format_rank(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+def _format_score(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"
 
 
 def _write_plan_json(plan: Tianzhu9OrderPlan, path: Path) -> None:

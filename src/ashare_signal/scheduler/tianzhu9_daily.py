@@ -134,7 +134,7 @@ def simulation_to_feishu_text(result: Tianzhu9SimulationResult) -> str:
     for position in result.positions[:8]:
         lines.append(
             f"- {position.symbol} {position.name} "
-            f"数量:{position.quantity} 现价:{position.last_price:.2f} "
+            f"数量:{position.quantity} 买入:{position.entry_price:.2f} 现价:{position.last_price:.2f} "
             f"市值:{format_money(position.market_value)} "
             f"浮盈亏:{format_signed_money(position.unrealized_pnl)} ({format_pct(position.unrealized_return)}) "
             f"持有:{position.holding_days}天"
@@ -157,18 +157,36 @@ def render_tianzhu9_simulation_markdown(result: Tianzhu9SimulationResult) -> str
         f"- 持仓数：{result.positions_count}",
         f"- 本次模拟成交：{result.executed_trades}",
         "",
-        "## 持仓浮盈亏",
+        "## 当前持仓",
     ]
     if not result.positions:
         lines.append("无持仓。")
-    for position in result.positions:
-        lines.append(
-            f"- {position.symbol} {position.name}，数量：{position.quantity}，"
-            f"成本：{position.entry_price:.2f}，现价：{position.last_price:.2f}，"
-            f"市值：{format_money(position.market_value)}，"
-            f"浮盈亏：{format_signed_money(position.unrealized_pnl)}（{format_pct(position.unrealized_return)}），"
-            f"持有：{position.holding_days}天"
+    else:
+        lines.extend(
+            [
+                "| 代码 | 名称 | 买入日 | 数量 | 买入价 | 现价 | 市值 | 浮盈亏 | 收益率 | 持有天数 |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
         )
+        for position in result.positions:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_markdown_cell(position.symbol),
+                        _escape_markdown_cell(position.name),
+                        _escape_markdown_cell(position.entry_date),
+                        str(position.quantity),
+                        f"{position.entry_price:.2f}",
+                        f"{position.last_price:.2f}",
+                        format_money(position.market_value),
+                        format_signed_money(position.unrealized_pnl),
+                        format_pct(position.unrealized_return),
+                        f"{position.holding_days}天",
+                    ]
+                )
+                + " |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -186,6 +204,10 @@ def format_pct(value: float) -> str:
 
 def format_trade_date(value: str) -> str:
     return f"{value[:4]}-{value[4:6]}-{value[6:]}" if len(value) == 8 and value.isdigit() else value
+
+
+def _escape_markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def run_tianzhu9_scheduler(
