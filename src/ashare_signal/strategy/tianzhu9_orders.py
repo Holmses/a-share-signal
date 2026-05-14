@@ -8,7 +8,8 @@ import math
 
 import pandas as pd
 
-from ashare_signal.backtest.tianzhu9_like import Tianzhu9LikeBacktestEngine
+from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
+from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
@@ -50,9 +51,9 @@ def generate_tianzhu9_order_plan(
     base_dir: Path,
     as_of: date | None = None,
     positions_path: Path | None = None,
-    top_n: int = 1,
-    hold_days: int = 2,
-    max_hold_days: int = 4,
+    top_n: int = 5,
+    hold_days: int = 5,
+    max_hold_days: int = 10,
     min_avg_amount_yuan: float = 50_000_000.0,
 ) -> Tianzhu9OrderPlan:
     requested_date = to_compact_date(as_of or date.today())
@@ -63,21 +64,64 @@ def generate_tianzhu9_order_plan(
     if signal_trade_date not in cached_dates:
         raise ValueError(f"No complete daily cache is available for {signal_trade_date}.")
     signal_index = cached_dates.index(signal_trade_date)
-    feature_dates = cached_dates[max(0, signal_index - 100) : signal_index + 1]
-    engine = Tianzhu9LikeBacktestEngine(
+    required_signal_history = SelectionEventStudyEngine.minimum_signal_history_trade_days()
+    if signal_index < required_signal_history:
+        cached_start = cached_dates[0]
+        suggested_sync_start = to_compact_date(
+            SelectionEventStudyEngine.recommended_sync_start_date(
+                repository=repository,
+                target_date=signal_trade_date,
+                prior_trade_days=required_signal_history,
+            )
+        )
+        raise ValueError(
+            "Tianzhu9 order generation needs at least "
+            f"{required_signal_history} complete trade days before signal date {signal_trade_date} "
+            f"for factor warm-up, but only found {signal_index}. "
+            f"Current cache starts at {cached_start}. "
+            f"Sync from {suggested_sync_start} or earlier and rerun."
+        )
+    feature_dates = cached_dates[
+        max(0, signal_index - SelectionEventStudyEngine.factor_history_trade_days()) : signal_index + 1
+    ]
+    selection_engine = SelectionEventStudyEngine(
+        config=config,
+        repository=repository,
+        base_dir=base_dir,
+        top_n_per_group=top_n,
+        min_avg_amount_yuan=min_avg_amount_yuan,
+        groups=["main", "chinext", "star"],
+        variants=["quality_momentum"],
+        horizons=[1],
+    )
+    engine = FullAMomentumBacktestEngine(
         config=config,
         repository=repository,
         base_dir=base_dir,
         top_n=top_n,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
+        max_positions=config.market.max_positions,
+        groups=["main", "chinext", "star"],
+        selection_variant="quality_momentum",
         min_avg_amount_yuan=min_avg_amount_yuan,
-        execution_mode="limit-swing",
-        extend_on_repeat=True,
+        market_min_breadth=0.50,
+        market_min_return_20d=0.0,
+        style_min_breadth=0.48,
+        style_min_return_20d=-0.01,
     )
-    factor_frame = engine._build_factor_frame(feature_dates)
-    selected = engine._select_candidates(factor_frame, signal_trade_date)
-    selected_symbols = {row["ts_code"] for row in selected}
+    factor_frame = selection_engine._build_factor_frame(feature_dates)
+    signal_frame = factor_frame.loc[factor_frame["trade_date"].astype(str) == signal_trade_date].copy()
+    style_state = engine._market_style_state(signal_frame)
+    risk_off = bool(style_state["market_risk_off"])
+    eligible_groups = set(style_state["eligible_groups"])
+    selected = engine._select_candidates(
+        signal_frame=signal_frame,
+        eligible_groups=eligible_groups,
+        excluded_symbols=set(),
+        risk_off=risk_off,
+    )
+    selected_symbols = {str(row["ts_code"]) for row in selected}
     selected_by_symbol = {str(row["ts_code"]): row for row in selected}
 
     positions = _load_tianzhu9_positions(positions_path or _default_positions_path(base_dir))
@@ -85,6 +129,7 @@ def generate_tianzhu9_order_plan(
         config=config,
         selected=selected,
         held_symbols={position["symbol"] for position in positions},
+        max_positions=config.market.max_positions,
     )
     sell_orders, hold_orders = _build_position_orders(
         config=config,
@@ -95,12 +140,28 @@ def generate_tianzhu9_order_plan(
         positions=positions,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
+        risk_off=risk_off,
+        eligible_groups=eligible_groups,
     )
     notes = []
+    market_breadth = float(style_state["market_breadth"])
+    market_return_20d = float(style_state["market_return_20d"])
+    if risk_off:
+        notes.append(
+            "全 A 严格过滤：市场风控未通过，"
+            f"breadth={market_breadth:.2%}，20日中位收益={market_return_20d:.2%}，本次不新开仓。"
+        )
+    else:
+        groups_text = "、".join(_format_group_name(group) for group in sorted(eligible_groups)) or "无"
+        notes.append(
+            "全 A 严格过滤：市场风控通过，"
+            f"breadth={market_breadth:.2%}，20日中位收益={market_return_20d:.2%}，"
+            f"允许开仓分组：{groups_text}。"
+        )
     if not positions:
         notes.append("未发现 Tianzhu9 持仓文件或持仓为空，本次只生成买入计划。")
     if not selected:
-        notes.append("今日未选出符合条件的创业板目标。")
+        notes.append("今日未选出符合全 A 严格过滤条件的目标，或市场/风格过滤未通过。")
 
     reports_dir = base_dir / config.paths.reports_dir / "tianzhu9-orders"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +185,7 @@ def generate_tianzhu9_order_plan(
 
 def render_tianzhu9_order_plan(plan: Tianzhu9OrderPlan) -> str:
     lines = [
-        "# Tianzhu9 调仓计划",
+        "# Tianzhu9 全 A 严格过滤调仓计划",
         "",
         f"- 信号日：{_format_trade_date(plan.signal_trade_date)}",
         f"- 计划交易日：{_format_trade_date(plan.planned_trade_date)}",
@@ -147,7 +208,7 @@ def render_tianzhu9_order_plan(plan: Tianzhu9OrderPlan) -> str:
 
 def plan_to_feishu_text(plan: Tianzhu9OrderPlan) -> str:
     lines = [
-        f"Tianzhu9 调仓计划 {_format_trade_date(plan.planned_trade_date)}",
+        f"Tianzhu9 全 A 严格过滤调仓计划 {_format_trade_date(plan.planned_trade_date)}",
         f"信号日：{_format_trade_date(plan.signal_trade_date)}",
         "",
         f"买入：{len(plan.buy_orders)}  卖出：{len(plan.sell_orders)}  持有：{len(plan.hold_orders)}",
@@ -172,9 +233,13 @@ def _build_buy_orders(
     config: AppConfig,
     selected: list[dict],
     held_symbols: set[str],
+    max_positions: int,
 ) -> list[Tianzhu9Order]:
     orders = []
+    free_slots = max(int(max_positions) - len(held_symbols), 0)
     for candidate in selected:
+        if len(orders) >= free_slots:
+            break
         symbol = str(candidate["ts_code"])
         if symbol in held_symbols:
             continue
@@ -204,6 +269,8 @@ def _build_position_orders(
     positions: list[dict],
     hold_days: int,
     max_hold_days: int,
+    risk_off: bool = False,
+    eligible_groups: set[str] | None = None,
 ) -> tuple[list[Tianzhu9Order], list[Tianzhu9Order]]:
     sell_orders: list[Tianzhu9Order] = []
     hold_orders: list[Tianzhu9Order] = []
@@ -217,7 +284,7 @@ def _build_position_orders(
         selected_row = selected_by_symbol.get(symbol)
         rank = int(selected_row["rank"]) if selected_row is not None else None
         score = float(selected_row["score"]) if selected_row is not None else None
-        feature = Tianzhu9LikeBacktestEngine._feature_row(factor_frame, signal_trade_date, symbol)
+        feature = FullAMomentumBacktestEngine._feature_row(factor_frame, signal_trade_date, symbol)
         if feature is None:
             hold_orders.append(
                 _position_order(
@@ -235,6 +302,7 @@ def _build_position_orders(
         prev_close = float(feature["close"])
         ma_5 = float(feature["ma_5"])
         ma_10 = float(feature["ma_10"])
+        group = str(feature.get("group") or "")
         highest_close = float(position.get("highest_close") or max(prev_close, entry_price))
         market_value = prev_close * quantity
         unrealized_pnl = market_value - entry_price * quantity
@@ -250,6 +318,10 @@ def _build_position_orders(
             reason = f"移动止盈：曾盈利 {high_profit_pct:.2%}，从高点回撤 {drawdown_from_high:.2%}。"
         elif holding_days >= max_hold_days:
             reason = f"达到最长持有 {max_hold_days} 天。"
+        elif holding_days >= hold_days and risk_off:
+            reason = f"全市场风控未通过，持仓已满 {hold_days} 天。"
+        elif holding_days >= hold_days and eligible_groups is not None and group not in eligible_groups:
+            reason = f"{_format_group_name(group)} 风格过滤未通过，持仓已满 {hold_days} 天。"
         elif holding_days >= hold_days and symbol not in selected_symbols and prev_close < ma_5:
             reason = f"持仓满 {hold_days} 天、不再入选，且跌破 5 日线。"
         elif holding_days >= hold_days and prev_close < ma_10:
@@ -485,6 +557,15 @@ def _format_rank(value: int | None) -> str:
 
 def _format_score(value: float | None) -> str:
     return "-" if value is None else f"{value:.4f}"
+
+
+def _format_group_name(value: str) -> str:
+    return {
+        "main": "主板",
+        "chinext": "创业板",
+        "star": "科创板",
+        "bse": "北交所",
+    }.get(value, value or "-")
 
 
 def _write_plan_json(plan: Tianzhu9OrderPlan, path: Path) -> None:

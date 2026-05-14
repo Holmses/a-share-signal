@@ -8,6 +8,7 @@ import time as time_module
 from zoneinfo import ZoneInfo
 
 from ashare_signal.config import AppConfig
+from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.data.repository import DataRepository
 from ashare_signal.data.sync import SyncResult, TushareSyncService
 from ashare_signal.data.tushare_client import TushareClient
@@ -38,21 +39,18 @@ def run_tianzhu9_daily_workflow(
     skip_sync: bool = False,
     positions_path: str | None = None,
     notify: bool = True,
-    top_n: int = 1,
-    hold_days: int = 2,
-    max_hold_days: int = 4,
+    top_n: int = 5,
+    hold_days: int = 5,
+    max_hold_days: int = 10,
 ) -> Tianzhu9DailyResult:
     resolved_end_date = _parse_date(end_date) if end_date else _today(config.runtime.timezone)
     sync_result: SyncResult | None = None
     if not skip_sync:
-        latest_cached = repository.latest_complete_daily_cache_date(end_date=to_compact_date(resolved_end_date))
-        paper_start = parse_compact_date(latest_cached) if latest_cached else resolved_end_date - timedelta(days=120)
-        resolved_sync_start_date = _resolve_sync_start_date(
+        resolved_sync_start_date = _resolve_tianzhu9_sync_start_date(
             repository=repository,
             config=config,
-            paper_start_date=paper_start,
-            sync_start_date=sync_start_date,
             end_date=resolved_end_date,
+            sync_start_date=sync_start_date,
         )
         client = TushareClient(token=config.tushare_token)
         sync_result = TushareSyncService(client=client, repository=repository).sync(
@@ -111,6 +109,34 @@ def send_tianzhu9_plan_to_feishu(
     secret = os.getenv("FEISHU_SECRET", "").strip() or None
     text = plan_to_feishu_text(plan) + "\n\n" + simulation_to_feishu_text(simulation_result)
     return FeishuWebhookNotifier(webhook_url=webhook, secret=secret).send_text(text)
+
+
+def _resolve_tianzhu9_sync_start_date(
+    repository: DataRepository,
+    config: AppConfig,
+    end_date: date,
+    sync_start_date: str | None,
+) -> date:
+    if sync_start_date:
+        return _parse_date(sync_start_date)
+
+    complete_dates = repository.complete_daily_cache_dates(end_date=to_compact_date(end_date))
+    required_history = SelectionEventStudyEngine.minimum_signal_history_trade_days()
+    if len(complete_dates) < required_history + 1:
+        return SelectionEventStudyEngine.recommended_sync_start_date(
+            repository=repository,
+            target_date=end_date,
+            prior_trade_days=required_history,
+        )
+
+    latest_cached = complete_dates[-1]
+    return _resolve_sync_start_date(
+        repository=repository,
+        config=config,
+        paper_start_date=parse_compact_date(latest_cached),
+        sync_start_date=None,
+        end_date=end_date,
+    )
 
 
 def simulation_to_feishu_text(result: Tianzhu9SimulationResult) -> str:
@@ -221,9 +247,9 @@ def run_tianzhu9_scheduler(
     positions_path: str | None = None,
     run_on_start: bool = False,
     notify: bool = True,
-    top_n: int = 1,
-    hold_days: int = 2,
-    max_hold_days: int = 4,
+    top_n: int = 5,
+    hold_days: int = 5,
+    max_hold_days: int = 10,
 ) -> None:
     resolved_run_at = parse_run_time(run_at or config.runtime.daily_run_time)
     resolved_timezone = timezone or config.runtime.timezone

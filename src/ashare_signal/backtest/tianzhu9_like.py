@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import json
 import math
@@ -10,7 +10,7 @@ import pandas as pd
 
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.utils.dates import to_compact_date
+from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
 @dataclass(slots=True)
@@ -77,19 +77,34 @@ class Tianzhu9LikeBacktestEngine:
     trade day. This keeps the run free from same-day close data leakage.
     """
 
+    RETURN_LOOKBACK_TRADE_DAYS = 90
+    FACTOR_HISTORY_TRADE_DAYS = 100
+    SYNC_WARMUP_CALENDAR_DAYS = 180
+
     def __init__(
         self,
         config: AppConfig,
         repository: DataRepository,
         base_dir: Path,
         *,
-        top_n: int = 1,
+        top_n: int = 5,
         hold_days: int = 1,
         max_position_weight: float = 1.0,
         min_avg_amount_yuan: float = 50_000_000.0,
         execution_mode: str = "intraday",
         extend_on_repeat: bool = False,
         max_hold_days: int | None = None,
+        max_positions: int | None = None,
+        loss_cooldown_days: int = 3,
+        max_return_30d: float = 1.20,
+        max_return_90d: float = 3.00,
+        min_return_5d: float = -0.08,
+        max_return_5d: float = 0.12,
+        min_close_to_ma5: float = -0.03,
+        min_close_to_ma10: float = -0.05,
+        max_close_to_ma10: float = 0.18,
+        max_close_to_ma20: float = 0.35,
+        max_upper_shadow_pct: float = 0.55,
         stop_loss_pct: float = 0.05,
         take_profit_trigger_pct: float = 0.08,
         trailing_stop_drawdown_pct: float = 0.04,
@@ -105,6 +120,18 @@ class Tianzhu9LikeBacktestEngine:
         self.execution_mode = execution_mode
         self.extend_on_repeat = bool(extend_on_repeat)
         self.max_hold_days = max(int(max_hold_days or max(self.hold_days, 5)), self.hold_days)
+        config_max_positions = getattr(getattr(config, "market", None), "max_positions", self.top_n)
+        self.max_positions = max(int(max_positions or config_max_positions), 1)
+        self.loss_cooldown_days = max(int(loss_cooldown_days), 0)
+        self.max_return_30d = float(max_return_30d)
+        self.max_return_90d = float(max_return_90d)
+        self.min_return_5d = float(min_return_5d)
+        self.max_return_5d = float(max_return_5d)
+        self.min_close_to_ma5 = float(min_close_to_ma5)
+        self.min_close_to_ma10 = float(min_close_to_ma10)
+        self.max_close_to_ma10 = float(max_close_to_ma10)
+        self.max_close_to_ma20 = float(max_close_to_ma20)
+        self.max_upper_shadow_pct = float(max_upper_shadow_pct)
         self.stop_loss_pct = float(stop_loss_pct)
         self.take_profit_trigger_pct = float(take_profit_trigger_pct)
         self.trailing_stop_drawdown_pct = float(trailing_stop_drawdown_pct)
@@ -125,13 +152,28 @@ class Tianzhu9LikeBacktestEngine:
         resolved_start = self._resolve_cached_start(cached_dates, start_date, resolved_end)
         start_index = cached_dates.index(resolved_start)
         end_index = cached_dates.index(resolved_end)
-        if start_index < 1:
-            raise ValueError("Tianzhu9-like backtest requires at least one signal day before start date.")
+        required_history = self.minimum_backtest_history_trade_days()
+        if start_index < required_history:
+            cached_start = cached_dates[0]
+            suggested_sync_start = to_compact_date(
+                self.recommended_sync_start_date(
+                    repository=self.repository,
+                    target_date=resolved_start,
+                    prior_trade_days=required_history,
+                )
+            )
+            raise ValueError(
+                "Tianzhu9-like backtest needs at least "
+                f"{required_history} complete trade days before start date {resolved_start} "
+                f"for factor warm-up, but only found {start_index}. "
+                f"Current cache starts at {cached_start}. "
+                f"Sync from {suggested_sync_start} or earlier and rerun."
+            )
         trade_dates = cached_dates[start_index : end_index + 1]
         if len(trade_dates) < 2:
             raise ValueError("Tianzhu9-like backtest requires at least two cached trade dates.")
 
-        feature_dates = cached_dates[max(0, start_index - 100) : end_index + 1]
+        feature_dates = cached_dates[max(0, start_index - self.factor_history_trade_days()) : end_index + 1]
         factor_frame = self._build_factor_frame(feature_dates)
         prices = self._load_price_map(feature_dates)
 
@@ -141,6 +183,7 @@ class Tianzhu9LikeBacktestEngine:
         trades: list[Tianzhu9Trade] = []
         equity_rows: list[dict] = []
         total_traded_value = 0.0
+        loss_cooldown_until: dict[str, int] = {}
 
         for trade_offset, trade_date in enumerate(trade_dates):
             global_trade_index = start_index + trade_offset
@@ -150,7 +193,16 @@ class Tianzhu9LikeBacktestEngine:
                 continue
 
             open_equity = self._mark_to_market_equity(cash, positions, day_prices, "open")
-            selected = self._select_candidates(factor_frame, signal_trade_date)
+            cooldown_symbols = {
+                symbol
+                for symbol, cooldown_until in loss_cooldown_until.items()
+                if cooldown_until >= global_trade_index
+            }
+            selected = self._select_candidates(
+                factor_frame,
+                signal_trade_date,
+                excluded_symbols=cooldown_symbols,
+            )
             selected_symbols = {row["ts_code"] for row in selected}
             if self.execution_mode == "limit-swing":
                 sell_cash_box = {"cash": cash}
@@ -164,16 +216,22 @@ class Tianzhu9LikeBacktestEngine:
                     selected_symbols=selected_symbols,
                     trades=trades,
                     cash_ref=sell_cash_box,
+                    loss_cooldown_until=loss_cooldown_until,
                 )
                 cash = sell_cash_box["cash"]
 
                 buy_cash_box = {"cash": cash}
+                buy_candidates = [
+                    row
+                    for row in selected
+                    if loss_cooldown_until.get(str(row["ts_code"]), -1) < global_trade_index
+                ]
                 total_traded_value += self._execute_limit_buys(
                     trade_date=trade_date,
                     signal_trade_date=signal_trade_date,
                     trade_index=global_trade_index,
                     prices=day_prices,
-                    candidates=selected,
+                    candidates=buy_candidates,
                     open_equity=open_equity,
                     positions=positions,
                     trades=trades,
@@ -204,6 +262,7 @@ class Tianzhu9LikeBacktestEngine:
                     selected_symbols=selected_symbols,
                     trades=trades,
                     cash_ref=sell_cash_box,
+                    loss_cooldown_until=loss_cooldown_until,
                 )
                 cash = sell_cash_box["cash"]
 
@@ -268,9 +327,22 @@ class Tianzhu9LikeBacktestEngine:
             "hold_days": self.hold_days,
             "execution_mode": self.execution_mode,
             "max_position_weight": self.max_position_weight,
+            "max_positions": self.max_positions,
             "min_avg_amount_yuan": self.min_avg_amount_yuan,
             "extend_on_repeat": self.extend_on_repeat,
             "max_hold_days": self.max_hold_days,
+            "loss_cooldown_days": self.loss_cooldown_days,
+            "selection_filters": {
+                "max_return_30d": self.max_return_30d,
+                "max_return_90d": self.max_return_90d,
+                "min_return_5d": self.min_return_5d,
+                "max_return_5d": self.max_return_5d,
+                "min_close_to_ma5": self.min_close_to_ma5,
+                "min_close_to_ma10": self.min_close_to_ma10,
+                "max_close_to_ma10": self.max_close_to_ma10,
+                "max_close_to_ma20": self.max_close_to_ma20,
+                "max_upper_shadow_pct": self.max_upper_shadow_pct,
+            },
             "initial_cash": initial_cash,
             "ending_equity": ending_equity,
             "total_return": total_return,
@@ -310,6 +382,37 @@ class Tianzhu9LikeBacktestEngine:
             trade_log_path=trade_log_path,
         )
 
+    @classmethod
+    def minimum_signal_history_trade_days(cls) -> int:
+        return cls.RETURN_LOOKBACK_TRADE_DAYS
+
+    @classmethod
+    def minimum_backtest_history_trade_days(cls) -> int:
+        return cls.minimum_signal_history_trade_days() + 1
+
+    @classmethod
+    def factor_history_trade_days(cls) -> int:
+        return cls.FACTOR_HISTORY_TRADE_DAYS
+
+    @classmethod
+    def recommended_sync_start_date(
+        cls,
+        repository: DataRepository,
+        target_date: date | str,
+        *,
+        prior_trade_days: int,
+    ) -> date:
+        target_trade_date = to_compact_date(target_date)
+        try:
+            resolved_target = repository.resolve_trade_date(target_trade_date)
+            trade_dates = repository.recent_open_trade_dates(
+                resolved_target,
+                count=prior_trade_days + 1,
+            )
+            return parse_compact_date(trade_dates[0])
+        except Exception:
+            return parse_compact_date(target_trade_date) - timedelta(days=cls.SYNC_WARMUP_CALENDAR_DAYS)
+
     def _resolve_cached_end(self, cached_dates: list[str], end_date: date | None) -> str:
         if end_date is None:
             return cached_dates[-1]
@@ -342,6 +445,8 @@ class Tianzhu9LikeBacktestEngine:
         daily["return_5d"] = grouped["close"].pct_change(periods=5)
         daily["ma_5"] = grouped["close"].transform(lambda series: series.rolling(window=5, min_periods=5).mean())
         daily["ma_10"] = grouped["close"].transform(lambda series: series.rolling(window=10, min_periods=10).mean())
+        daily["ma_20"] = grouped["close"].transform(lambda series: series.rolling(window=20, min_periods=20).mean())
+        daily["high_20d"] = grouped["high"].transform(lambda series: series.rolling(window=20, min_periods=20).max())
         daily["avg_amount_20d_yuan"] = grouped["amount_yuan"].transform(
             lambda series: series.rolling(window=20, min_periods=20).mean()
         )
@@ -349,6 +454,13 @@ class Tianzhu9LikeBacktestEngine:
             lambda series: series.rolling(window=5, min_periods=5).mean()
         )
         daily["amount_ratio_5d"] = daily["amount_yuan"] / daily["avg_amount_5d_yuan"]
+        daily["close_to_ma_5"] = daily["close"] / daily["ma_5"] - 1.0
+        daily["close_to_ma_10"] = daily["close"] / daily["ma_10"] - 1.0
+        daily["close_to_ma_20"] = daily["close"] / daily["ma_20"] - 1.0
+        daily["drawdown_from_20d_high"] = daily["close"] / daily["high_20d"] - 1.0
+        candle_range = daily["high"] - daily["low"]
+        upper_shadow = daily["high"] - daily[["open", "close"]].max(axis=1)
+        daily["upper_shadow_pct"] = (upper_shadow / candle_range.where(candle_range > 0)).clip(lower=0.0)
 
         daily_basic = pd.concat(
             [self.repository.load_daily_basic(trade_date) for trade_date in trade_dates],
@@ -391,10 +503,20 @@ class Tianzhu9LikeBacktestEngine:
             & (frame["avg_amount_20d_yuan"].fillna(0.0) >= self.min_avg_amount_yuan)
             & frame["return_30d"].notna()
             & frame["return_90d"].notna()
+            & (frame["return_30d"] <= self.max_return_30d)
+            & (frame["return_90d"] <= self.max_return_90d)
+            & (frame["return_5d"] >= self.min_return_5d)
+            & (frame["return_5d"] <= self.max_return_5d)
             & frame["open"].notna()
             & frame["close"].notna()
             & frame["ma_5"].notna()
             & frame["ma_10"].notna()
+            & frame["ma_20"].notna()
+            & (frame["close_to_ma_5"] >= self.min_close_to_ma5)
+            & (frame["close_to_ma_10"] >= self.min_close_to_ma10)
+            & (frame["close_to_ma_10"] <= self.max_close_to_ma10)
+            & (frame["close_to_ma_20"] <= self.max_close_to_ma20)
+            & (frame["upper_shadow_pct"].fillna(0.0) <= self.max_upper_shadow_pct)
         )
         frame = frame.loc[candidate_mask].copy()
         if frame.empty:
@@ -411,13 +533,23 @@ class Tianzhu9LikeBacktestEngine:
         frame["stability_score"] = (
             1.0 - ((frame["return_5d"].fillna(0.0).abs() - 0.02) / 0.18)
         ).clip(lower=0.0, upper=1.0)
+        frame["trend_quality_score"] = (
+            (frame["close"] >= frame["ma_5"]).astype(float) * 0.35
+            + (frame["ma_5"] >= frame["ma_10"]).astype(float) * 0.35
+            + (frame["ma_10"] >= frame["ma_20"]).astype(float) * 0.30
+        )
+        frame["overheat_score"] = (
+            1.0 - ((frame["close_to_ma_20"].fillna(0.0) - 0.08) / 0.27)
+        ).clip(lower=0.0, upper=1.0)
         frame["score"] = (
-            frame["return_30d_rank"].fillna(0.0) * 0.40
-            + frame["return_90d_rank"].fillna(0.0) * 0.25
+            frame["return_30d_rank"].fillna(0.0) * 0.28
+            + frame["return_90d_rank"].fillna(0.0) * 0.18
             + frame["amount_rank"].fillna(0.0) * 0.15
             + frame["turnover_rank"].fillna(0.0) * 0.10
             + frame["volume_ratio_score"].fillna(0.0) * 0.05
-            + frame["stability_score"].fillna(0.0) * 0.05
+            + frame["stability_score"].fillna(0.0) * 0.14
+            + frame["trend_quality_score"].fillna(0.0) * 0.05
+            + frame["overheat_score"].fillna(0.0) * 0.05
         )
         return frame.sort_values(["trade_date", "score", "avg_amount_20d_yuan"], ascending=[True, False, False])
 
@@ -430,12 +562,21 @@ class Tianzhu9LikeBacktestEngine:
             price_map[trade_date] = frame.set_index("ts_code")
         return price_map
 
-    def _select_candidates(self, factor_frame: pd.DataFrame, signal_trade_date: str) -> list[dict]:
+    def _select_candidates(
+        self,
+        factor_frame: pd.DataFrame,
+        signal_trade_date: str,
+        excluded_symbols: set[str] | None = None,
+    ) -> list[dict]:
         if factor_frame.empty:
             return []
         daily = factor_frame.loc[factor_frame["trade_date"].astype(str) == signal_trade_date].copy()
         if daily.empty:
             return []
+        if excluded_symbols:
+            daily = daily.loc[~daily["ts_code"].isin(excluded_symbols)]
+            if daily.empty:
+                return []
         daily = daily.sort_values(["score", "avg_amount_20d_yuan"], ascending=[False, False]).head(self.top_n)
         rows = []
         for rank, row in enumerate(daily.to_dict(orient="records"), start=1):
@@ -474,12 +615,14 @@ class Tianzhu9LikeBacktestEngine:
     ) -> float:
         if not candidates or open_equity <= 0:
             return 0.0
+        if len(positions) >= self.max_positions:
+            return 0.0
 
-        raw_weights = [1.0 / math.log(float(candidate["rank"]) + 2.0) for candidate in candidates]
-        weight_sum = sum(raw_weights)
         traded_value = 0.0
-        tranche_value = open_equity / self.hold_days
-        for candidate, raw_weight in zip(candidates, raw_weights):
+        target_slot_value = open_equity / self.max_positions
+        for candidate in candidates:
+            if len(positions) >= self.max_positions:
+                break
             symbol = candidate["ts_code"]
             if symbol in positions or symbol not in prices.index:
                 continue
@@ -488,7 +631,7 @@ class Tianzhu9LikeBacktestEngine:
             if math.isnan(open_price) or open_price <= 0:
                 continue
             target_value = min(
-                tranche_value * (raw_weight / weight_sum),
+                target_slot_value,
                 open_equity * self.max_position_weight,
                 cash_ref["cash"],
             )
@@ -554,12 +697,14 @@ class Tianzhu9LikeBacktestEngine:
     ) -> float:
         if not candidates or open_equity <= 0:
             return 0.0
+        if len(positions) >= self.max_positions:
+            return 0.0
 
-        raw_weights = [1.0 / math.log(float(candidate["rank"]) + 2.0) for candidate in candidates]
-        weight_sum = sum(raw_weights)
         traded_value = 0.0
-        tranche_value = open_equity / self.hold_days
-        for candidate, raw_weight in zip(candidates, raw_weights):
+        target_slot_value = open_equity / self.max_positions
+        for candidate in candidates:
+            if len(positions) >= self.max_positions:
+                break
             symbol = candidate["ts_code"]
             if symbol in positions or symbol not in prices.index:
                 continue
@@ -574,7 +719,7 @@ class Tianzhu9LikeBacktestEngine:
                 continue
             fill_price = day_open if day_open <= limit_price else limit_price
             target_value = min(
-                tranche_value * (raw_weight / weight_sum),
+                target_slot_value,
                 open_equity * self.max_position_weight,
                 cash_ref["cash"],
             )
@@ -637,6 +782,7 @@ class Tianzhu9LikeBacktestEngine:
         selected_symbols: set[str],
         trades: list[Tianzhu9Trade],
         cash_ref: dict[str, float],
+        loss_cooldown_until: dict[str, int] | None = None,
     ) -> float:
         traded_value = 0.0
         for symbol in list(positions):
@@ -689,6 +835,8 @@ class Tianzhu9LikeBacktestEngine:
             net_amount = gross_amount - fees
             cash_ref["cash"] += net_amount
             pnl = net_amount - position.entry_cost
+            if loss_cooldown_until is not None and pnl <= 0 and self.loss_cooldown_days > 0:
+                loss_cooldown_until[symbol] = trade_index + self.loss_cooldown_days
             trades.append(
                 Tianzhu9Trade(
                     trade_date=trade_date,
@@ -744,6 +892,7 @@ class Tianzhu9LikeBacktestEngine:
         selected_symbols: set[str],
         trades: list[Tianzhu9Trade],
         cash_ref: dict[str, float],
+        loss_cooldown_until: dict[str, int] | None = None,
     ) -> float:
         traded_value = 0.0
         for symbol in list(positions):
@@ -768,6 +917,8 @@ class Tianzhu9LikeBacktestEngine:
             net_amount = gross_amount - fees
             cash_ref["cash"] += net_amount
             pnl = net_amount - position.entry_cost
+            if loss_cooldown_until is not None and pnl <= 0 and self.loss_cooldown_days > 0:
+                loss_cooldown_until[symbol] = trade_index + self.loss_cooldown_days
             trades.append(
                 Tianzhu9Trade(
                     trade_date=trade_date,

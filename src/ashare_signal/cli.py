@@ -5,6 +5,9 @@ from datetime import date
 from pathlib import Path
 
 from ashare_signal.backtest.engine import BacktestEngine
+from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
+from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
+from ashare_signal.backtest.selection_event_study import parse_csv_values, parse_horizons
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9LikeBacktestEngine
 from ashare_signal.config import load_config, load_env_file
 from ashare_signal.data.repository import DataRepository
@@ -146,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9.add_argument(
         "--top-n",
         type=int,
-        default=1,
+        default=5,
         help="Number of top-ranked ChiNext symbols to buy each signal day",
     )
     tianzhu9.add_argument(
@@ -185,6 +188,73 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum hold duration when --extend-on-repeat is enabled",
     )
 
+    selection_events = subparsers.add_parser(
+        "study-selection-events",
+        help="Evaluate selection quality by future fixed-horizon returns",
+    )
+    selection_events.add_argument(
+        "--config",
+        default="configs/strategy.toml.example",
+        help="Path to the TOML config file",
+    )
+    selection_events.add_argument(
+        "--start-date",
+        default=None,
+        help="Inclusive entry date in ISO format",
+    )
+    selection_events.add_argument(
+        "--end-date",
+        default=None,
+        help="Inclusive requested entry date in ISO format",
+    )
+    selection_events.add_argument(
+        "--top-n-per-group",
+        type=int,
+        default=5,
+        help="Number of symbols selected per board group per signal day",
+    )
+    selection_events.add_argument(
+        "--groups",
+        default="main,chinext,star",
+        help="Comma-separated board groups: main,chinext,star,bse",
+    )
+    selection_events.add_argument(
+        "--variants",
+        default="legacy,quality,quality_momentum,quality_strict",
+        help="Comma-separated selection variants: legacy,quality,quality_momentum,quality_strict",
+    )
+    selection_events.add_argument(
+        "--horizons",
+        default="1,3,5,10",
+        help="Comma-separated forward horizons in trade days",
+    )
+    selection_events.add_argument(
+        "--min-avg-amount-yuan",
+        type=float,
+        default=50000000.0,
+        help="Minimum 20-day average turnover in yuan",
+    )
+
+    full_a_momentum = subparsers.add_parser(
+        "backtest-full-a-momentum",
+        help="Run full A-share momentum backtest with market/style filters",
+    )
+    full_a_momentum.add_argument("--config", default="configs/strategy.toml.example")
+    full_a_momentum.add_argument("--start-date", default=None)
+    full_a_momentum.add_argument("--end-date", default=None)
+    full_a_momentum.add_argument("--top-n", type=int, default=5)
+    full_a_momentum.add_argument("--hold-days", type=int, default=5)
+    full_a_momentum.add_argument("--max-hold-days", type=int, default=10)
+    full_a_momentum.add_argument("--max-positions", type=int, default=None)
+    full_a_momentum.add_argument("--groups", default="main,chinext,star")
+    full_a_momentum.add_argument("--selection-variant", default="quality_momentum")
+    full_a_momentum.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+    full_a_momentum.add_argument("--market-min-breadth", type=float, default=0.50)
+    full_a_momentum.add_argument("--market-min-return-20d", type=float, default=0.0)
+    full_a_momentum.add_argument("--style-min-breadth", type=float, default=0.48)
+    full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
+    full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
+
     tianzhu9_orders = subparsers.add_parser(
         "generate-tianzhu9-orders",
         help="Generate next-day Tianzhu9 buy/sell plan from local cache",
@@ -196,9 +266,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Tianzhu9 positions CSV path, defaults to data/positions/tianzhu9_positions.csv",
     )
-    tianzhu9_orders.add_argument("--top-n", type=int, default=1)
-    tianzhu9_orders.add_argument("--hold-days", type=int, default=2)
-    tianzhu9_orders.add_argument("--max-hold-days", type=int, default=4)
+    tianzhu9_orders.add_argument("--top-n", type=int, default=5)
+    tianzhu9_orders.add_argument("--hold-days", type=int, default=5)
+    tianzhu9_orders.add_argument("--max-hold-days", type=int, default=10)
 
     tianzhu9_daily = subparsers.add_parser(
         "run-tianzhu9-daily",
@@ -210,9 +280,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_daily.add_argument("--skip-sync", action="store_true")
     tianzhu9_daily.add_argument("--positions", default=None)
     tianzhu9_daily.add_argument("--no-notify", action="store_true")
-    tianzhu9_daily.add_argument("--top-n", type=int, default=1)
-    tianzhu9_daily.add_argument("--hold-days", type=int, default=2)
-    tianzhu9_daily.add_argument("--max-hold-days", type=int, default=4)
+    tianzhu9_daily.add_argument("--top-n", type=int, default=5)
+    tianzhu9_daily.add_argument("--hold-days", type=int, default=5)
+    tianzhu9_daily.add_argument("--max-hold-days", type=int, default=10)
 
     tianzhu9_scheduler = subparsers.add_parser(
         "run-tianzhu9-scheduler",
@@ -226,9 +296,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_scheduler.add_argument("--positions", default=None)
     tianzhu9_scheduler.add_argument("--run-on-start", action="store_true")
     tianzhu9_scheduler.add_argument("--no-notify", action="store_true")
-    tianzhu9_scheduler.add_argument("--top-n", type=int, default=1)
-    tianzhu9_scheduler.add_argument("--hold-days", type=int, default=2)
-    tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=4)
+    tianzhu9_scheduler.add_argument("--top-n", type=int, default=5)
+    tianzhu9_scheduler.add_argument("--hold-days", type=int, default=5)
+    tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=10)
 
     run_daily = subparsers.add_parser(
         "run-daily",
@@ -480,6 +550,89 @@ def main() -> int:
         print(f"execution_mode={result.execution_mode}")
         print(f"extend_on_repeat={result.extend_on_repeat}")
         print(f"max_hold_days={result.max_hold_days}")
+        print(f"equity_curve_path={result.equity_curve_path}")
+        print(f"trade_log_path={result.trade_log_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "study-selection-events":
+        try:
+            groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
+            variants = parse_csv_values(args.variants, SelectionEventStudyEngine.DEFAULT_VARIANTS)
+            horizons = parse_horizons(args.horizons, SelectionEventStudyEngine.DEFAULT_HORIZONS)
+            result = SelectionEventStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                top_n_per_group=args.top_n_per_group,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                groups=groups,
+                variants=variants,
+                horizons=horizons,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Selection event study completed")
+        print(f"start_entry_date={result.start_entry_date}")
+        print(f"end_entry_date={result.end_entry_date}")
+        print(f"start_signal_date={result.start_signal_date}")
+        print(f"end_signal_date={result.end_signal_date}")
+        print(f"variants={','.join(result.variants)}")
+        print(f"groups={','.join(result.groups)}")
+        print(f"horizons={','.join(str(value) for value in result.horizons)}")
+        print(f"event_count={result.event_count}")
+        print(f"events_path={result.events_path}")
+        print(f"daily_path={result.daily_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "backtest-full-a-momentum":
+        try:
+            groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
+            result = FullAMomentumBacktestEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                top_n=args.top_n,
+                hold_days=args.hold_days,
+                max_hold_days=args.max_hold_days,
+                max_positions=args.max_positions,
+                groups=groups,
+                selection_variant=args.selection_variant,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                market_min_breadth=args.market_min_breadth,
+                market_min_return_20d=args.market_min_return_20d,
+                style_min_breadth=args.style_min_breadth,
+                style_min_return_20d=args.style_min_return_20d,
+                style_score_weight=args.style_score_weight,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Full A momentum backtest completed")
+        print(f"start_trade_date={result.start_trade_date}")
+        print(f"end_trade_date={result.end_trade_date}")
+        print(f"top_n={result.top_n}")
+        print(f"hold_days={result.hold_days}")
+        print(f"initial_cash={result.initial_cash}")
+        print(f"ending_equity={result.ending_equity}")
+        print(f"total_return={result.total_return}")
+        print(f"annual_return={result.annual_return}")
+        print(f"max_drawdown={result.max_drawdown}")
+        print(f"sharpe={result.sharpe}")
+        print(f"turnover={result.turnover}")
+        print(f"trade_count={result.trade_count}")
+        print(f"sell_trade_count={result.sell_trade_count}")
+        print(f"win_rate={result.win_rate}")
         print(f"equity_curve_path={result.equity_curve_path}")
         print(f"trade_log_path={result.trade_log_path}")
         print(f"summary_path={result.summary_path}")
