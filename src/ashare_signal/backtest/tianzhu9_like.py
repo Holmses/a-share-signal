@@ -26,6 +26,7 @@ class Tianzhu9Position:
     highest_close: float
     score: float
     rank: int
+    highest_high: float | None = None
 
 
 @dataclass(slots=True)

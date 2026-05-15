@@ -12,6 +12,7 @@ from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngi
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9BacktestResult, Tianzhu9Position, Tianzhu9Trade
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
+from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
 from ashare_signal.utils.dates import to_compact_date
 
 
@@ -40,6 +41,7 @@ class FullAMomentumBacktestEngine:
         stop_loss_pct: float = 0.05,
         take_profit_trigger_pct: float = 0.08,
         trailing_stop_drawdown_pct: float = 0.04,
+        hard_exit_days: int | None = 23,
         lot_size: int | None = None,
     ) -> None:
         self.config = config
@@ -58,9 +60,12 @@ class FullAMomentumBacktestEngine:
         self.style_min_return_20d = float(style_min_return_20d)
         self.style_score_weight = float(style_score_weight)
         self.loss_cooldown_days = max(int(loss_cooldown_days), 0)
-        self.stop_loss_pct = float(stop_loss_pct)
-        self.take_profit_trigger_pct = float(take_profit_trigger_pct)
-        self.trailing_stop_drawdown_pct = float(trailing_stop_drawdown_pct)
+        self.hard_exit_days = max(int(hard_exit_days), 1) if hard_exit_days is not None else None
+        self.exit_strategy = (
+            "tiered_trailing_take_profit_no_hard_stop_no_time_exit"
+            if self.hard_exit_days is None
+            else f"tiered_trailing_take_profit_hard_exit_{self.hard_exit_days}d"
+        )
         self.lot_size = int(lot_size or config.backtest.lot_size)
 
     def run(self, start_date: date | None = None, end_date: date | None = None) -> Tianzhu9BacktestResult:
@@ -214,7 +219,7 @@ class FullAMomentumBacktestEngine:
         ).replace("-", "m").replace(".", "p")
         stem = (
             f"full-a-momentum-{self.selection_variant}-top{self.top_n}-"
-            f"{groups_slug}-h{self.hold_days}-max{self.max_hold_days}-filter-"
+            f"{groups_slug}-exit-tiered-trailing-hard{self.hard_exit_days or 'none'}-filter-"
             f"{filter_slug}-{resolved_start}-{resolved_end}"
         )
         summary_path = reports_dir / f"{stem}-summary.json"
@@ -237,6 +242,13 @@ class FullAMomentumBacktestEngine:
             "groups": self.groups,
             "hold_days": self.hold_days,
             "max_hold_days": self.max_hold_days,
+            "exit_strategy": self.exit_strategy,
+            "exit_strategy_note": (
+                "profit-only tiered trailing take-profit; no hard stop-loss, no fixed max-hold exit"
+                if self.hard_exit_days is None
+                else f"tiered trailing take-profit plus hard exit after {self.hard_exit_days} trade days"
+            ),
+            "hard_exit_days": self.hard_exit_days,
             "max_positions": self.max_positions,
             "min_avg_amount_yuan": self.min_avg_amount_yuan,
             "market_filter": {
@@ -438,6 +450,7 @@ class FullAMomentumBacktestEngine:
                 highest_close=fill_price,
                 score=float(candidate["score"]),
                 rank=int(candidate["rank"]),
+                highest_high=fill_price,
             )
             trades.append(
                 Tianzhu9Trade(
@@ -484,28 +497,15 @@ class FullAMomentumBacktestEngine:
             if feature is None:
                 continue
             prev_close = float(feature["close"])
-            ma_5 = float(feature["ma_5"])
-            ma_10 = float(feature["ma_10"])
-            group = str(feature["group"])
-            pnl_pct = prev_close / position.entry_price - 1.0
-            high_profit_pct = position.highest_close / position.entry_price - 1.0
-            drawdown_from_high = prev_close / position.highest_close - 1.0 if position.highest_close else 0.0
-            exit_signal = False
-            if pnl_pct <= -self.stop_loss_pct:
-                exit_signal = True
-            elif high_profit_pct >= self.take_profit_trigger_pct and drawdown_from_high <= -self.trailing_stop_drawdown_pct:
-                exit_signal = True
-            elif holding_days >= self.max_hold_days:
-                exit_signal = True
-            elif holding_days >= self.hold_days and risk_off:
-                exit_signal = True
-            elif holding_days >= self.hold_days and group not in eligible_groups:
-                exit_signal = True
-            elif holding_days >= self.hold_days and symbol not in selected_symbols and prev_close < ma_5:
-                exit_signal = True
-            elif holding_days >= self.hold_days and prev_close < ma_10:
-                exit_signal = True
-            if not exit_signal:
+            highest_price = max(position.highest_close, position.highest_high or 0.0)
+            exit_check = tiered_trailing_take_profit(
+                entry_price=position.entry_price,
+                current_close=prev_close,
+                highest_price=highest_price,
+            )
+            if not exit_check.should_exit and (
+                self.hard_exit_days is None or holding_days < self.hard_exit_days
+            ):
                 continue
 
             row = prices.loc[symbol]
@@ -570,9 +570,11 @@ class FullAMomentumBacktestEngine:
             if position.symbol not in prices.index:
                 continue
             close_price = float(prices.loc[position.symbol, "close"])
-            if math.isnan(close_price):
-                continue
-            position.highest_close = max(position.highest_close, close_price)
+            high_price = float(prices.loc[position.symbol, "high"])
+            if not math.isnan(close_price):
+                position.highest_close = max(position.highest_close, close_price)
+            if not math.isnan(high_price):
+                position.highest_high = max(position.highest_high or position.highest_close, high_price)
 
     @staticmethod
     def _feature_row(factor_frame: pd.DataFrame, signal_trade_date: str, symbol: str) -> pd.Series | None:

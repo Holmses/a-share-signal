@@ -254,6 +254,7 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--style-min-breadth", type=float, default=0.48)
     full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
     full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
+    full_a_momentum.add_argument("--hard-exit-days", type=int, default=23)
 
     tianzhu9_orders = subparsers.add_parser(
         "generate-tianzhu9-orders",
@@ -269,6 +270,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_orders.add_argument("--top-n", type=int, default=5)
     tianzhu9_orders.add_argument("--hold-days", type=int, default=5)
     tianzhu9_orders.add_argument("--max-hold-days", type=int, default=10)
+    tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=23)
 
     tianzhu9_daily = subparsers.add_parser(
         "run-tianzhu9-daily",
@@ -283,6 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_daily.add_argument("--top-n", type=int, default=5)
     tianzhu9_daily.add_argument("--hold-days", type=int, default=5)
     tianzhu9_daily.add_argument("--max-hold-days", type=int, default=10)
+    tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=23)
 
     tianzhu9_scheduler = subparsers.add_parser(
         "run-tianzhu9-scheduler",
@@ -299,6 +302,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_scheduler.add_argument("--top-n", type=int, default=5)
     tianzhu9_scheduler.add_argument("--hold-days", type=int, default=5)
     tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=10)
+    tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=23)
 
     run_daily = subparsers.add_parser(
         "run-daily",
@@ -610,6 +614,7 @@ def main() -> int:
                 style_min_breadth=args.style_min_breadth,
                 style_min_return_20d=args.style_min_return_20d,
                 style_score_weight=args.style_score_weight,
+                hard_exit_days=args.hard_exit_days,
             ).run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,
                 end_date=_parse_date(args.end_date) if args.end_date else None,
@@ -686,6 +691,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                hard_exit_days=args.hard_exit_days,
             )
         except (FileNotFoundError, ValueError) as error:
             parser.exit(1, f"{error}\n")
@@ -713,6 +719,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                hard_exit_days=args.hard_exit_days,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)
@@ -821,6 +828,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                hard_exit_days=args.hard_exit_days,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)

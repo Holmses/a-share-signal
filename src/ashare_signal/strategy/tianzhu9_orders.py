@@ -12,6 +12,7 @@ from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
+from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
@@ -54,6 +55,7 @@ def generate_tianzhu9_order_plan(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
+    hard_exit_days: int | None = 23,
     min_avg_amount_yuan: float = 50_000_000.0,
 ) -> Tianzhu9OrderPlan:
     requested_date = to_compact_date(as_of or date.today())
@@ -138,8 +140,10 @@ def generate_tianzhu9_order_plan(
         selected_symbols=selected_symbols,
         selected_by_symbol=selected_by_symbol,
         positions=positions,
+        cached_dates=cached_dates,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
+        hard_exit_days=hard_exit_days,
         risk_off=risk_off,
         eligible_groups=eligible_groups,
     )
@@ -162,6 +166,16 @@ def generate_tianzhu9_order_plan(
         notes.append("未发现 Tianzhu9 持仓文件或持仓为空，本次只生成买入计划。")
     if not selected:
         notes.append("今日未选出符合全 A 严格过滤条件的目标，或市场/风格过滤未通过。")
+    if hard_exit_days is None:
+        notes.append(
+            "卖出规则：不使用硬止损/固定持有天数退出，"
+            "仅在盈利后触发 8%/4%、12%/6%、20%/8% 分层追踪止盈。"
+        )
+    else:
+        notes.append(
+            "卖出规则：不使用硬止损，先执行盈利后分层追踪止盈，"
+            f"未触发止盈则持仓满 {hard_exit_days} 个交易日硬卖出。"
+        )
 
     reports_dir = base_dir / config.paths.reports_dir / "tianzhu9-orders"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -269,18 +283,23 @@ def _build_position_orders(
     positions: list[dict],
     hold_days: int,
     max_hold_days: int,
+    cached_dates: list[str] | None = None,
+    hard_exit_days: int | None = None,
     risk_off: bool = False,
     eligible_groups: set[str] | None = None,
 ) -> tuple[list[Tianzhu9Order], list[Tianzhu9Order]]:
     sell_orders: list[Tianzhu9Order] = []
     hold_orders: list[Tianzhu9Order] = []
-    signal_day = parse_compact_date(signal_trade_date)
     for position in positions:
         symbol = str(position["symbol"])
         quantity = int(position["quantity"])
         entry_price = float(position["entry_price"])
         entry_date = date.fromisoformat(_normalize_iso_date(str(position["entry_date"])))
-        holding_days = max((signal_day - entry_date).days + 1, 1)
+        holding_days = _holding_trade_days(
+            cached_dates=cached_dates,
+            entry_date=entry_date,
+            signal_trade_date=signal_trade_date,
+        )
         selected_row = selected_by_symbol.get(symbol)
         rank = int(selected_row["rank"]) if selected_row is not None else None
         score = float(selected_row["score"]) if selected_row is not None else None
@@ -300,32 +319,28 @@ def _build_position_orders(
             continue
 
         prev_close = float(feature["close"])
-        ma_5 = float(feature["ma_5"])
-        ma_10 = float(feature["ma_10"])
-        group = str(feature.get("group") or "")
         highest_close = float(position.get("highest_close") or max(prev_close, entry_price))
+        highest_high = float(position.get("highest_high") or highest_close)
+        highest_price = max(highest_close, highest_high)
         market_value = prev_close * quantity
         unrealized_pnl = market_value - entry_price * quantity
         unrealized_return = (prev_close / entry_price - 1.0) if entry_price else None
-        pnl_pct = prev_close / entry_price - 1.0
-        high_profit_pct = highest_close / entry_price - 1.0
-        drawdown_from_high = prev_close / highest_close - 1.0 if highest_close else 0.0
 
         reason = None
-        if pnl_pct <= -0.05:
-            reason = f"硬止损：按 T-1 收盘价计算收益 {pnl_pct:.2%}。"
-        elif high_profit_pct >= 0.08 and drawdown_from_high <= -0.04:
-            reason = f"移动止盈：曾盈利 {high_profit_pct:.2%}，从高点回撤 {drawdown_from_high:.2%}。"
-        elif holding_days >= max_hold_days:
-            reason = f"达到最长持有 {max_hold_days} 天。"
-        elif holding_days >= hold_days and risk_off:
-            reason = f"全市场风控未通过，持仓已满 {hold_days} 天。"
-        elif holding_days >= hold_days and eligible_groups is not None and group not in eligible_groups:
-            reason = f"{_format_group_name(group)} 风格过滤未通过，持仓已满 {hold_days} 天。"
-        elif holding_days >= hold_days and symbol not in selected_symbols and prev_close < ma_5:
-            reason = f"持仓满 {hold_days} 天、不再入选，且跌破 5 日线。"
-        elif holding_days >= hold_days and prev_close < ma_10:
-            reason = f"持仓满 {hold_days} 天，且跌破 10 日线。"
+        exit_check = tiered_trailing_take_profit(
+            entry_price=entry_price,
+            current_close=prev_close,
+            highest_price=highest_price,
+        )
+        if exit_check.should_exit:
+            reason = (
+                "分层追踪止盈："
+                f"最高浮盈 {exit_check.peak_profit_pct:.2%}，"
+                f"从高点回撤 {exit_check.drawdown_from_peak_pct:.2%}，"
+                f"触发 {exit_check.trigger_profit_pct:.0%}/{exit_check.trigger_drawdown_pct:.0%} 档。"
+            )
+        elif hard_exit_days is not None and holding_days >= hard_exit_days:
+            reason = f"硬卖出：持仓满 {hard_exit_days} 个交易日。"
 
         if reason:
             limit_price = round(prev_close * (1 - config.pricing.sell_markdown), 2)
@@ -346,9 +361,9 @@ def _build_position_orders(
             )
         else:
             if symbol in selected_symbols:
-                reason = f"重复入选，未达到最长持有 {max_hold_days} 天。"
+                reason = "今日重复入选，未触发分层追踪止盈。"
             else:
-                reason = f"未触发止损/止盈/均线退出，当前持有 {holding_days} 天。"
+                reason = f"未触发分层追踪止盈，当前持有 {holding_days} 天。"
             hold_orders.append(
                 _position_order(
                     "HOLD",
@@ -365,6 +380,25 @@ def _build_position_orders(
                 )
             )
     return sell_orders, hold_orders
+
+
+def _holding_trade_days(
+    *,
+    cached_dates: list[str] | None,
+    entry_date: date,
+    signal_trade_date: str,
+) -> int:
+    if cached_dates and signal_trade_date in cached_dates:
+        entry_trade_date = to_compact_date(entry_date)
+        eligible_entries = [
+            trade_date
+            for trade_date in cached_dates
+            if entry_trade_date <= trade_date <= signal_trade_date
+        ]
+        if eligible_entries:
+            return cached_dates.index(signal_trade_date) - cached_dates.index(eligible_entries[0]) + 1
+    signal_day = parse_compact_date(signal_trade_date)
+    return max((signal_day - entry_date).days + 1, 1)
 
 
 def _load_tianzhu9_positions(path: Path) -> list[dict]:
@@ -386,6 +420,8 @@ def _load_tianzhu9_positions(path: Path) -> list[dict]:
         row["quantity"] = int(row["quantity"])
         if "highest_close" not in row or pd.isna(row["highest_close"]):
             row["highest_close"] = row["entry_price"]
+        if "highest_high" not in row or pd.isna(row["highest_high"]):
+            row["highest_high"] = row["highest_close"]
     return rows
 
 

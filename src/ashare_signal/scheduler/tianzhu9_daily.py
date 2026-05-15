@@ -42,6 +42,7 @@ def run_tianzhu9_daily_workflow(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
+    hard_exit_days: int | None = 23,
 ) -> Tianzhu9DailyResult:
     resolved_end_date = _parse_date(end_date) if end_date else _today(config.runtime.timezone)
     sync_result: SyncResult | None = None
@@ -81,6 +82,7 @@ def run_tianzhu9_daily_workflow(
         top_n=top_n,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
+        hard_exit_days=hard_exit_days,
     )
     broker.stage_plan(new_plan_path=plan.json_path, as_of_trade_date=data_trade_date)
     plan.markdown_path.write_text(
@@ -250,6 +252,7 @@ def run_tianzhu9_scheduler(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
+    hard_exit_days: int | None = 23,
 ) -> None:
     resolved_run_at = parse_run_time(run_at or config.runtime.daily_run_time)
     resolved_timezone = timezone or config.runtime.timezone
@@ -269,6 +272,7 @@ def run_tianzhu9_scheduler(
             top_n=top_n,
             hold_days=hold_days,
             max_hold_days=max_hold_days,
+            hard_exit_days=hard_exit_days,
         )
         print(f"data_trade_date={result.data_trade_date}", flush=True)
         print(f"planned_trade_date={result.plan.planned_trade_date}", flush=True)

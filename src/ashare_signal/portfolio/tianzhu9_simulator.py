@@ -198,11 +198,26 @@ class Tianzhu9PaperBroker:
             row["entry_date"] = str(row["entry_date"])
             row["entry_price"] = float(row["entry_price"])
             row["quantity"] = int(row["quantity"])
-            row["highest_close"] = float(row.get("highest_close") or row["entry_price"])
+            highest_close = row.get("highest_close")
+            if pd.isna(highest_close):
+                highest_close = row["entry_price"]
+            row["highest_close"] = float(highest_close)
+            highest_high = row.get("highest_high")
+            if pd.isna(highest_high):
+                highest_high = row["highest_close"]
+            row["highest_high"] = float(highest_high)
         return rows
 
     def _save_positions(self, positions: list[dict]) -> None:
-        columns = ["symbol", "name", "entry_date", "entry_price", "quantity", "highest_close"]
+        columns = [
+            "symbol",
+            "name",
+            "entry_date",
+            "entry_price",
+            "quantity",
+            "highest_close",
+            "highest_high",
+        ]
         frame = pd.DataFrame(positions, columns=columns)
         frame.to_csv(self.positions_path, index=False)
 
@@ -335,6 +350,7 @@ class Tianzhu9PaperBroker:
                     "entry_price": round(fill_price, 4),
                     "quantity": shares,
                     "highest_close": round(fill_price, 4),
+                    "highest_high": round(fill_price, 4),
                 }
             )
             trades.append(self._trade_row(planned_trade_date, "BUY", order, shares, fill_price, gross_amount, fees, net_amount))
@@ -402,9 +418,11 @@ class Tianzhu9PaperBroker:
             if symbol not in prices.index:
                 continue
             close_price = float(prices.loc[symbol, "close"])
-            if math.isnan(close_price) or close_price <= 0:
-                continue
-            position["highest_close"] = max(float(position.get("highest_close") or 0.0), close_price)
+            high_price = float(prices.loc[symbol, "high"])
+            if not (math.isnan(close_price) or close_price <= 0):
+                position["highest_close"] = max(float(position.get("highest_close") or 0.0), close_price)
+            if not (math.isnan(high_price) or high_price <= 0):
+                position["highest_high"] = max(float(position.get("highest_high") or 0.0), high_price)
 
     def _position_snapshots(self, positions: list[dict], trade_date: str) -> list[Tianzhu9PositionSnapshot]:
         try:
