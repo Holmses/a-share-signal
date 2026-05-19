@@ -44,6 +44,7 @@ class SelectionEventStudyEngine:
     DEFAULT_GROUPS = ("main", "chinext", "star")
     DEFAULT_VARIANTS = ("legacy", "quality", "quality_momentum", "quality_strict")
     DEFAULT_HORIZONS = (1, 3, 5, 10)
+    SW_INDUSTRY_SRC = "SW2021"
 
     def __init__(
         self,
@@ -313,6 +314,7 @@ class SelectionEventStudyEngine:
         ].copy()
         stock_basic["list_date"] = pd.to_datetime(stock_basic["list_date"], format="%Y%m%d", errors="coerce")
         stock_basic["group"] = stock_basic.apply(_classify_board, axis=1)
+        stock_basic = self._merge_sw_industry(stock_basic)
 
         frame = daily.merge(
             daily_basic[
@@ -327,9 +329,12 @@ class SelectionEventStudyEngine:
             on=["ts_code", "trade_date"],
             how="left",
         ).merge(stock_basic, on="ts_code", how="left")
+        frame = self._merge_index_market_features(frame, trade_dates)
+        frame = self._merge_financial_features(frame, trade_dates)
         frame["trade_timestamp"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce")
         frame["listed_days"] = (frame["trade_timestamp"] - frame["list_date"]).dt.days
         frame["is_st"] = frame["name"].fillna("").str.upper().str.contains("ST")
+        frame["style_group"] = frame["sw_l1_name"].fillna(frame["industry"]).fillna(frame["group"])
 
         base_mask = (
             frame["group"].isin(self.groups)
@@ -396,15 +401,16 @@ class SelectionEventStudyEngine:
             + frame["overheat_score"].fillna(0.0) * 0.05
         )
         frame["quality_momentum_score"] = (
-            frame["return_30d_rank"].fillna(0.0) * 0.32
-            + frame["return_90d_rank"].fillna(0.0) * 0.16
+            frame["return_30d_rank"].fillna(0.0) * 0.30
+            + frame["return_90d_rank"].fillna(0.0) * 0.15
             + frame["amount_rank"].fillna(0.0) * 0.12
             + frame["turnover_rank"].fillna(0.0) * 0.08
             + frame["volume_ratio_score"].fillna(0.0) * 0.04
             + frame["stability_score"].fillna(0.0) * 0.10
             + frame["trend_quality_score"].fillna(0.0) * 0.08
             + frame["overheat_score"].fillna(0.0) * 0.04
-            + frame["near_high_score"].fillna(0.0) * 0.06
+            + frame["near_high_score"].fillna(0.0) * 0.05
+            + frame["financial_quality_score"].fillna(0.5) * 0.04
         )
         frame["quality_strict_score"] = (
             frame["return_30d_rank"].fillna(0.0) * 0.22
@@ -418,6 +424,148 @@ class SelectionEventStudyEngine:
             + frame["near_high_score"].fillna(0.0) * 0.04
         )
         return frame.sort_values(["trade_date", "group", "quality_score"], ascending=[True, True, False])
+
+    def _merge_sw_industry(self, stock_basic: pd.DataFrame) -> pd.DataFrame:
+        stock_basic = stock_basic.copy()
+        try:
+            members = self.repository.load_index_member_all(src=self.SW_INDUSTRY_SRC).copy()
+        except (AttributeError, FileNotFoundError):
+            members = pd.DataFrame()
+        if members.empty:
+            stock_basic["sw_l1_code"] = pd.NA
+            stock_basic["sw_l1_name"] = pd.NA
+            return stock_basic
+        if "ts_code" not in members.columns and "con_code" in members.columns:
+            members = members.rename(columns={"con_code": "ts_code"})
+        if "ts_code" not in members.columns:
+            stock_basic["sw_l1_code"] = pd.NA
+            stock_basic["sw_l1_name"] = pd.NA
+            return stock_basic
+        if "is_new" in members.columns:
+            is_new = members["is_new"].astype(str).str.upper()
+            members = members.loc[is_new.isin(["Y", "1", "TRUE"])]
+        members = members.drop_duplicates("ts_code", keep="last")
+        if "l1_name" not in members.columns and "index_code" in members.columns:
+            try:
+                classify = self.repository.load_index_classify(src=self.SW_INDUSTRY_SRC)
+            except (AttributeError, FileNotFoundError):
+                classify = pd.DataFrame()
+            if not classify.empty and {"index_code", "industry_name"}.issubset(classify.columns):
+                members = members.merge(classify[["index_code", "industry_name"]], on="index_code", how="left")
+                members = members.rename(columns={"industry_name": "l1_name"})
+        columns = ["ts_code"]
+        rename_map = {}
+        if "l1_code" in members.columns:
+            columns.append("l1_code")
+            rename_map["l1_code"] = "sw_l1_code"
+        if "l1_name" in members.columns:
+            columns.append("l1_name")
+            rename_map["l1_name"] = "sw_l1_name"
+        if len(columns) == 1:
+            stock_basic["sw_l1_code"] = pd.NA
+            stock_basic["sw_l1_name"] = pd.NA
+            return stock_basic
+        merged = stock_basic.merge(members[columns].rename(columns=rename_map), on="ts_code", how="left")
+        if "sw_l1_code" not in merged.columns:
+            merged["sw_l1_code"] = pd.NA
+        if "sw_l1_name" not in merged.columns:
+            merged["sw_l1_name"] = pd.NA
+        return merged
+
+    def _merge_index_market_features(self, frame: pd.DataFrame, trade_dates: list[str]) -> pd.DataFrame:
+        frame = frame.copy()
+        benchmark = self.config.market.benchmark
+        try:
+            index_daily = self.repository.load_index_daily(benchmark).copy()
+        except (AttributeError, FileNotFoundError):
+            index_daily = pd.DataFrame()
+        if index_daily.empty:
+            frame["benchmark_return_20d"] = pd.NA
+            frame["benchmark_close_to_ma20"] = pd.NA
+            frame["benchmark_pe_ttm"] = pd.NA
+            frame["benchmark_pb"] = pd.NA
+            return frame
+        for column in ("close", "pct_chg", "amount"):
+            if column in index_daily.columns:
+                index_daily[column] = pd.to_numeric(index_daily[column], errors="coerce")
+        index_daily = index_daily.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
+        grouped = index_daily.groupby("ts_code", group_keys=False)
+        index_daily["benchmark_return_20d"] = grouped["close"].pct_change(periods=20)
+        index_daily["benchmark_ma20"] = grouped["close"].transform(
+            lambda series: series.rolling(window=20, min_periods=20).mean()
+        )
+        index_daily["benchmark_close_to_ma20"] = index_daily["close"] / index_daily["benchmark_ma20"] - 1.0
+        market = index_daily.loc[
+            index_daily["ts_code"] == benchmark,
+            ["trade_date", "benchmark_return_20d", "benchmark_close_to_ma20"],
+        ].copy()
+        try:
+            daily_basic = self.repository.load_index_daily_basic_for_dates(trade_dates)
+        except AttributeError:
+            daily_basic = pd.DataFrame()
+        if not daily_basic.empty and "ts_code" in daily_basic.columns:
+            daily_basic = daily_basic.loc[daily_basic["ts_code"] == benchmark].copy()
+            for column in ("pe_ttm", "pb"):
+                if column in daily_basic.columns:
+                    daily_basic[column] = pd.to_numeric(daily_basic[column], errors="coerce")
+            columns = ["trade_date"]
+            rename_map = {}
+            if "pe_ttm" in daily_basic.columns:
+                columns.append("pe_ttm")
+                rename_map["pe_ttm"] = "benchmark_pe_ttm"
+            if "pb" in daily_basic.columns:
+                columns.append("pb")
+                rename_map["pb"] = "benchmark_pb"
+            if len(columns) > 1:
+                market = market.merge(daily_basic[columns].rename(columns=rename_map), on="trade_date", how="left")
+        return frame.merge(market, on="trade_date", how="left")
+
+    def _merge_financial_features(self, frame: pd.DataFrame, trade_dates: list[str]) -> pd.DataFrame:
+        frame = frame.copy()
+        financial_columns = _financial_columns()
+        for column in financial_columns:
+            if column not in frame.columns:
+                frame[column] = pd.NA
+        try:
+            fina = self.repository.load_fina_indicator_between(end_date=max(trade_dates)).copy()
+        except (AttributeError, FileNotFoundError):
+            fina = pd.DataFrame()
+        if fina.empty or "ts_code" not in fina.columns or "ann_date" not in fina.columns:
+            return _add_financial_quality_score(frame)
+        fina["ann_timestamp"] = pd.to_datetime(fina["ann_date"].astype(str), format="%Y%m%d", errors="coerce")
+        fina = fina.dropna(subset=["ann_timestamp"])
+        for column in financial_columns:
+            if column in ("ann_date", "end_date"):
+                continue
+            if column in fina.columns:
+                fina[column] = pd.to_numeric(fina[column], errors="coerce")
+        frame["trade_timestamp"] = pd.to_datetime(frame["trade_date"].astype(str), format="%Y%m%d", errors="coerce")
+        frame["_row_order"] = range(len(frame))
+        fina_columns = ["ann_timestamp"] + [column for column in financial_columns if column in fina.columns]
+        merged_parts = []
+        for symbol, symbol_frame in frame.groupby("ts_code", sort=False):
+            symbol_fina = fina.loc[fina["ts_code"] == symbol, fina_columns].sort_values("ann_timestamp")
+            if symbol_fina.empty:
+                merged_parts.append(symbol_frame)
+                continue
+            merged_parts.append(
+                pd.merge_asof(
+                    symbol_frame.sort_values("trade_timestamp"),
+                    symbol_fina,
+                    left_on="trade_timestamp",
+                    right_on="ann_timestamp",
+                    direction="backward",
+                    suffixes=("", "_fina"),
+                )
+            )
+        merged = pd.concat(merged_parts, ignore_index=True).sort_values("_row_order")
+        merged = merged.drop(columns=["_row_order", "ann_timestamp"], errors="ignore")
+        for column in financial_columns:
+            fina_column = f"{column}_fina"
+            if fina_column in merged.columns:
+                merged[column] = merged[fina_column].combine_first(merged[column])
+                merged = merged.drop(columns=[fina_column])
+        return _add_financial_quality_score(merged)
 
     def _load_price_map(self, trade_dates: list[str]) -> dict[str, pd.DataFrame]:
         price_map = {}
@@ -611,6 +759,60 @@ def _classify_board(row: pd.Series) -> str:
     if market == "北交所" or exchange == "BSE":
         return "bse"
     return "main"
+
+
+def _financial_columns() -> list[str]:
+    return [
+        "ann_date",
+        "end_date",
+        "roe",
+        "roe_waa",
+        "roe_dt",
+        "roa",
+        "roic",
+        "grossprofit_margin",
+        "netprofit_margin",
+        "debt_to_assets",
+        "ocf_to_or",
+        "ocf_to_profit",
+        "basic_eps_yoy",
+        "dt_eps_yoy",
+        "op_yoy",
+        "netprofit_yoy",
+        "dt_netprofit_yoy",
+        "ocf_yoy",
+    ]
+
+
+def _add_financial_quality_score(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    roe = frame["roe_waa"].combine_first(frame["roe"]).combine_first(frame["roe_dt"])
+    growth = frame["dt_netprofit_yoy"].combine_first(frame["netprofit_yoy"]).combine_first(frame["op_yoy"])
+    operating_cashflow = frame["ocf_to_or"].combine_first(frame["ocf_to_profit"])
+    score_parts = pd.DataFrame(
+        {
+            "roe_score": ((roe - 3.0) / 12.0).clip(lower=0.0, upper=1.0),
+            "gross_margin_score": (frame["grossprofit_margin"] / 35.0).clip(lower=0.0, upper=1.0),
+            "debt_score": (1.0 - ((frame["debt_to_assets"] - 35.0) / 45.0)).clip(lower=0.0, upper=1.0),
+            "growth_score": ((growth + 20.0) / 80.0).clip(lower=0.0, upper=1.0),
+            "cashflow_score": ((operating_cashflow + 5.0) / 25.0).clip(lower=0.0, upper=1.0),
+        },
+        index=frame.index,
+    )
+    weights = pd.Series(
+        {
+            "roe_score": 0.30,
+            "gross_margin_score": 0.20,
+            "debt_score": 0.20,
+            "growth_score": 0.20,
+            "cashflow_score": 0.10,
+        }
+    )
+    weighted = score_parts.mul(weights, axis=1)
+    available_weight = score_parts.notna().mul(weights, axis=1).sum(axis=1)
+    frame["financial_data_available"] = available_weight > 0
+    frame["financial_quality_score"] = (weighted.sum(axis=1) / available_weight.where(available_weight > 0)).fillna(0.5)
+    return frame
 
 
 def _dedupe_csv_values(values: list[str]) -> list[str]:

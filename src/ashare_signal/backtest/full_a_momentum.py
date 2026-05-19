@@ -186,6 +186,8 @@ class FullAMomentumBacktestEngine:
                     "selected": ",".join(row["ts_code"] for row in selected),
                     "market_breadth": style_state["market_breadth"],
                     "market_return_20d": style_state["market_return_20d"],
+                    "market_source": style_state["market_source"],
+                    "benchmark_close_to_ma20": style_state["benchmark_close_to_ma20"],
                     "eligible_groups": ",".join(sorted(eligible_groups)),
                     "risk_off": risk_off,
                 }
@@ -258,6 +260,16 @@ class FullAMomentumBacktestEngine:
                 "style_min_return_20d": self.style_min_return_20d,
                 "style_score_weight": self.style_score_weight,
             },
+            "enhanced_data": {
+                "benchmark_index": self.config.market.benchmark,
+                "market_source_counts": equity_frame["market_source"].value_counts(dropna=False).to_dict(),
+                "sw_industry_rows": int(factor_frame["sw_l1_name"].notna().sum())
+                if "sw_l1_name" in factor_frame.columns
+                else 0,
+                "financial_data_rows": int(factor_frame["financial_data_available"].fillna(False).sum())
+                if "financial_data_available" in factor_frame.columns
+                else 0,
+            },
             "risk_off_days": int(equity_frame["risk_off"].sum()),
             "average_position_count": float(equity_frame["position_count"].mean()),
             "average_invested_ratio": float((1.0 - equity_frame["cash"] / equity_frame["equity"]).mean()),
@@ -327,13 +339,26 @@ class FullAMomentumBacktestEngine:
                 "market_risk_off": True,
                 "eligible_groups": [],
                 "group_scores": {},
+                "market_source": "empty",
+                "benchmark_close_to_ma20": None,
             }
         market_breadth = float((signal_frame["close"] >= signal_frame["ma_20"]).mean())
-        market_return_20d = float(signal_frame["return_20d"].median())
+        benchmark_return = signal_frame.get("benchmark_return_20d")
+        benchmark_close_to_ma20_series = signal_frame.get("benchmark_close_to_ma20")
+        benchmark_close_to_ma20 = None
+        if benchmark_return is not None and benchmark_return.notna().any():
+            market_return_20d = float(benchmark_return.dropna().iloc[-1])
+            market_source = "benchmark_index"
+            if benchmark_close_to_ma20_series is not None and benchmark_close_to_ma20_series.notna().any():
+                benchmark_close_to_ma20 = float(benchmark_close_to_ma20_series.dropna().iloc[-1])
+        else:
+            market_return_20d = float(signal_frame["return_20d"].median())
+            market_source = "stock_median"
         risk_off = market_breadth < self.market_min_breadth or market_return_20d < self.market_min_return_20d
+        style_column = "style_group" if "style_group" in signal_frame.columns else "group"
         eligible_groups = []
         group_scores: dict[str, float] = {}
-        for group, group_frame in signal_frame.groupby("group"):
+        for group, group_frame in signal_frame.groupby(style_column):
             breadth = float((group_frame["close"] >= group_frame["ma_20"]).mean())
             return_20d = float(group_frame["return_20d"].median())
             momentum_5d = float(group_frame["return_5d"].median())
@@ -348,6 +373,8 @@ class FullAMomentumBacktestEngine:
             "market_risk_off": risk_off,
             "eligible_groups": [] if risk_off else eligible_groups,
             "group_scores": group_scores,
+            "market_source": market_source,
+            "benchmark_close_to_ma20": benchmark_close_to_ma20,
         }
 
     def _select_candidates(
@@ -360,8 +387,9 @@ class FullAMomentumBacktestEngine:
         if signal_frame.empty or risk_off or not eligible_groups:
             return []
         score_column = f"{self.selection_variant}_score"
+        style_column = "style_group" if "style_group" in signal_frame.columns else "group"
         frame = signal_frame.loc[
-            signal_frame["group"].isin(eligible_groups)
+            signal_frame[style_column].isin(eligible_groups)
             & (~signal_frame["ts_code"].isin(excluded_symbols))
         ].copy()
         if frame.empty:
@@ -372,7 +400,7 @@ class FullAMomentumBacktestEngine:
             base_dir=self.base_dir,
             top_n_per_group=max(self.top_n, self.max_positions),
             min_avg_amount_yuan=self.min_avg_amount_yuan,
-            groups=list(eligible_groups),
+            groups=self.groups,
             variants=[self.selection_variant],
             horizons=[1],
         )
@@ -381,7 +409,10 @@ class FullAMomentumBacktestEngine:
             return []
         style_state = self._market_style_state(signal_frame)
         group_scores = style_state["group_scores"]
-        frame["selection_score"] = frame[score_column].fillna(0.0) + frame["group"].map(group_scores).fillna(0.0) * self.style_score_weight
+        frame["selection_score"] = (
+            frame[score_column].fillna(0.0)
+            + frame[style_column].map(group_scores).fillna(0.0) * self.style_score_weight
+        )
         selected = frame.sort_values(["selection_score", "avg_amount_20d_yuan"], ascending=[False, False]).head(self.top_n)
         rows = []
         for rank, row in enumerate(selected.to_dict(orient="records"), start=1):

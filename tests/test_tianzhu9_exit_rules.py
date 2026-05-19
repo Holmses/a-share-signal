@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
-from ashare_signal.strategy.tianzhu9_orders import _build_position_orders
+from ashare_signal.strategy.tianzhu9_orders import _build_position_orders, _format_group_list
 
 
 def _config():
@@ -145,3 +145,9 @@ def test_order_generation_can_force_exit_after_trade_days() -> None:
     assert [order.symbol for order in sell_orders] == ["301396.SZ"]
     assert sell_orders[0].holding_days == 8
     assert sell_orders[0].reason == "硬卖出：持仓满 8 个交易日。"
+
+
+def test_format_group_list_compacts_many_industries() -> None:
+    text = _format_group_list({f"行业{index:02d}" for index in range(20)}, max_items=3)
+
+    assert text.endswith("等 20 个分组")

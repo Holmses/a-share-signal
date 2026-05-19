@@ -156,7 +156,7 @@ def generate_tianzhu9_order_plan(
             f"breadth={market_breadth:.2%}，20日中位收益={market_return_20d:.2%}，本次不新开仓。"
         )
     else:
-        groups_text = "、".join(_format_group_name(group) for group in sorted(eligible_groups)) or "无"
+        groups_text = _format_group_list(eligible_groups)
         notes.append(
             "全 A 严格过滤：市场风控通过，"
             f"breadth={market_breadth:.2%}，20日中位收益={market_return_20d:.2%}，"
@@ -602,6 +602,15 @@ def _format_group_name(value: str) -> str:
         "star": "科创板",
         "bse": "北交所",
     }.get(value, value or "-")
+
+
+def _format_group_list(groups: set[str], max_items: int = 12) -> str:
+    values = [_format_group_name(group) for group in sorted(groups)]
+    if not values:
+        return "无"
+    if len(values) <= max_items:
+        return "、".join(values)
+    return "、".join(values[:max_items]) + f" 等 {len(values)} 个分组"
 
 
 def _write_plan_json(plan: Tianzhu9OrderPlan, path: Path) -> None:

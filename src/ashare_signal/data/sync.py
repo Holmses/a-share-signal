@@ -18,6 +18,11 @@ class SyncResult:
     daily_basic_files: int
     moneyflow_files: int
     limit_list_files: int
+    index_daily_files: int
+    index_daily_basic_files: int
+    index_classify_files: int
+    index_member_files: int
+    fina_indicator_files: int
 
 
 class TushareSyncService:
@@ -31,6 +36,9 @@ class TushareSyncService:
         end_date: str,
         exchange: str = "SSE",
         calendar_end_date: str | None = None,
+        sync_fina_indicator: bool = False,
+        fina_indicator_limit: int | None = None,
+        force_fina_indicator: bool = False,
     ) -> SyncResult:
         data_end_date = to_compact_date(end_date)
         resolved_calendar_end_date = to_compact_date(calendar_end_date or end_date)
@@ -43,6 +51,58 @@ class TushareSyncService:
 
         stock_basic = self.client.fetch_stock_basic(list_status="L")
         self.repository.save_stock_basic(stock_basic, list_status="L")
+        benchmark = self.repository.config.market.benchmark
+        index_daily_files = 0
+        index_daily_basic_files = 0
+        index_classify_files = 0
+        index_member_files = 0
+        fina_indicator_files = 0
+
+        try:
+            index_daily = self.client.fetch_index_daily(
+                ts_code=benchmark,
+                start_date=start_date,
+                end_date=data_end_date,
+            )
+        except Exception:
+            index_daily = None
+        if index_daily is not None and not index_daily.empty:
+            self.repository.save_index_daily(benchmark, index_daily)
+            index_daily_files = 1
+
+        try:
+            index_classify = self.client.fetch_index_classify(src="SW2021")
+        except Exception:
+            index_classify = None
+        if index_classify is not None and not index_classify.empty:
+            self.repository.save_index_classify("SW2021", index_classify)
+            index_classify_files = 1
+
+        try:
+            index_member_all = self.client.fetch_index_member_all(src="SW2021")
+        except Exception:
+            index_member_all = None
+        if index_member_all is not None and not index_member_all.empty:
+            self.repository.save_index_member_all("SW2021", index_member_all)
+            index_member_files = 1
+
+        if sync_fina_indicator and "ts_code" in stock_basic.columns:
+            symbols = sorted(stock_basic["ts_code"].dropna().astype(str).unique())
+            if fina_indicator_limit is not None:
+                symbols = symbols[: max(int(fina_indicator_limit), 0)]
+            for ts_code in symbols:
+                if (
+                    not force_fina_indicator
+                    and self.repository.fina_indicator_symbol_cache_exists(ts_code)
+                ):
+                    continue
+                try:
+                    fina_indicator = self.client.fetch_fina_indicator(ts_code=ts_code)
+                except Exception:
+                    continue
+                if fina_indicator is not None and not fina_indicator.empty:
+                    self.repository.save_fina_indicator_symbol(ts_code, fina_indicator)
+                    fina_indicator_files += 1
 
         calendar_dates = (
             calendar["cal_date"]
@@ -105,6 +165,15 @@ class TushareSyncService:
                 self.repository.save_limit_list(trade_date, limit_list)
                 limit_list_files += 1
 
+            if not self.repository.index_daily_basic_cache_exists(trade_date):
+                try:
+                    index_daily_basic = self.client.fetch_index_daily_basic(trade_date=trade_date)
+                except Exception:
+                    index_daily_basic = None
+                if index_daily_basic is not None and not index_daily_basic.empty:
+                    self.repository.save_index_daily_basic(trade_date, index_daily_basic)
+                    index_daily_basic_files += 1
+
         return SyncResult(
             start_date=to_compact_date(start_date),
             end_date=data_end_date,
@@ -115,4 +184,9 @@ class TushareSyncService:
             daily_basic_files=daily_basic_files,
             moneyflow_files=moneyflow_files,
             limit_list_files=limit_list_files,
+            index_daily_files=index_daily_files,
+            index_daily_basic_files=index_daily_basic_files,
+            index_classify_files=index_classify_files,
+            index_member_files=index_member_files,
+            fina_indicator_files=fina_indicator_files,
         )

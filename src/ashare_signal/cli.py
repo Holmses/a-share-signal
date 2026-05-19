@@ -56,6 +56,22 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Inclusive sync end date in ISO format",
     )
+    sync.add_argument(
+        "--sync-fina-indicator",
+        action="store_true",
+        help="Also sync fina_indicator by stock symbol. This is intentionally opt-in because it calls many APIs.",
+    )
+    sync.add_argument(
+        "--fina-indicator-limit",
+        type=int,
+        default=None,
+        help="Optional max number of stock symbols to sync for fina_indicator.",
+    )
+    sync.add_argument(
+        "--force-fina-indicator",
+        action="store_true",
+        help="Refresh fina_indicator even when a per-symbol cache file already exists.",
+    )
 
     build_universe = subparsers.add_parser(
         "build-universe",
@@ -446,6 +462,9 @@ def main() -> int:
             result = TushareSyncService(client=client, repository=repository).sync(
                 start_date=args.start_date,
                 end_date=args.end_date,
+                sync_fina_indicator=args.sync_fina_indicator,
+                fina_indicator_limit=args.fina_indicator_limit,
+                force_fina_indicator=args.force_fina_indicator,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)
@@ -461,6 +480,11 @@ def main() -> int:
         print(f"daily_basic_files={result.daily_basic_files}")
         print(f"moneyflow_files={result.moneyflow_files}")
         print(f"limit_list_files={result.limit_list_files}")
+        print(f"index_daily_files={result.index_daily_files}")
+        print(f"index_daily_basic_files={result.index_daily_basic_files}")
+        print(f"index_classify_files={result.index_classify_files}")
+        print(f"index_member_files={result.index_member_files}")
+        print(f"fina_indicator_files={result.fina_indicator_files}")
         return 0
 
     if args.command == "build-universe":

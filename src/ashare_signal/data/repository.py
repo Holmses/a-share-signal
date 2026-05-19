@@ -69,7 +69,17 @@ class DataRepository:
             existing = pd.read_csv(path)
             frame = pd.concat([existing, frame], ignore_index=True)
 
-        for date_column in ("cal_date", "pretrade_date", "trade_date", "list_date", "delist_date"):
+        for date_column in (
+            "ann_date",
+            "cal_date",
+            "end_date",
+            "in_date",
+            "list_date",
+            "out_date",
+            "pretrade_date",
+            "trade_date",
+            "delist_date",
+        ):
             if date_column in frame.columns:
                 frame[date_column] = self._normalize_date_series(frame[date_column])
 
@@ -125,6 +135,53 @@ class DataRepository:
     def save_limit_list(self, trade_date: str, frame: "pd.DataFrame") -> Path:
         return self._write_csv(frame, self.tushare_root / "limit_list" / f"{trade_date}.csv")
 
+    def save_index_daily(self, index_code: str, frame: "pd.DataFrame") -> Path:
+        return self._upsert_csv(
+            frame=frame,
+            path=self.tushare_root / "index_daily" / f"{index_code}.csv",
+            subset=["ts_code", "trade_date"],
+            sort_by=["ts_code", "trade_date"],
+        )
+
+    def save_index_daily_basic(self, trade_date: str, frame: "pd.DataFrame") -> Path:
+        return self._write_csv(frame, self.tushare_root / "index_daily_basic" / f"{trade_date}.csv")
+
+    def save_index_classify(self, src: str, frame: "pd.DataFrame") -> Path:
+        subset = [column for column in ("index_code", "industry_code", "level") if column in frame.columns]
+        if not subset:
+            subset = list(frame.columns[:1])
+        return self._upsert_csv(
+            frame=frame,
+            path=self.tushare_root / "index_classify" / f"{src}.csv",
+            subset=subset,
+            sort_by=subset,
+        )
+
+    def save_index_member_all(self, src: str, frame: "pd.DataFrame") -> Path:
+        subset = [column for column in ("ts_code", "l1_code", "l2_code", "l3_code") if column in frame.columns]
+        if not subset:
+            subset = list(frame.columns[:1])
+        return self._upsert_csv(
+            frame=frame,
+            path=self.tushare_root / "index_member_all" / f"{src}.csv",
+            subset=subset,
+            sort_by=subset,
+        )
+
+    def save_fina_indicator(self, ann_date: str, frame: "pd.DataFrame") -> Path:
+        frame = frame.copy()
+        if "ann_date" in frame.columns:
+            frame["ann_date"] = self._normalize_date_series(frame["ann_date"])
+        return self._write_csv(frame, self.tushare_root / "fina_indicator" / f"{ann_date}.csv")
+
+    def save_fina_indicator_symbol(self, ts_code: str, frame: "pd.DataFrame") -> Path:
+        return self._upsert_csv(
+            frame=frame,
+            path=self.tushare_root / "fina_indicator_by_symbol" / f"{ts_code}.csv",
+            subset=["ts_code", "ann_date", "end_date"],
+            sort_by=["ts_code", "ann_date", "end_date"],
+        )
+
     def load_daily(self, trade_date: str) -> "pd.DataFrame":
         frame = self._read_csv(self.tushare_root / "daily" / f"{trade_date}.csv")
         frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
@@ -144,6 +201,82 @@ class DataRepository:
         frame = self._read_csv(self.tushare_root / "limit_list" / f"{trade_date}.csv")
         frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
         return frame
+
+    def load_index_daily(self, index_code: str) -> "pd.DataFrame":
+        frame = self._read_csv(self.tushare_root / "index_daily" / f"{index_code}.csv")
+        frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
+        return frame
+
+    def load_index_daily_basic(self, trade_date: str) -> "pd.DataFrame":
+        frame = self._read_csv(self.tushare_root / "index_daily_basic" / f"{trade_date}.csv")
+        frame["trade_date"] = self._normalize_date_series(frame["trade_date"])
+        return frame
+
+    def load_index_daily_basic_for_dates(self, trade_dates: list[str]) -> "pd.DataFrame":
+        import pandas as pd
+
+        frames = []
+        for trade_date in trade_dates:
+            try:
+                frames.append(self.load_index_daily_basic(trade_date))
+            except FileNotFoundError:
+                continue
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def load_index_classify(self, src: str = "SW2021") -> "pd.DataFrame":
+        return self._read_csv(self.tushare_root / "index_classify" / f"{src}.csv")
+
+    def load_index_member_all(self, src: str = "SW2021") -> "pd.DataFrame":
+        frame = self._read_csv(self.tushare_root / "index_member_all" / f"{src}.csv")
+        for column in ("in_date", "out_date"):
+            if column in frame.columns:
+                frame[column] = self._normalize_date_series(frame[column])
+        return frame
+
+    def load_fina_indicator_between(self, start_date: str | None = None, end_date: str | None = None) -> "pd.DataFrame":
+        import pandas as pd
+
+        start = self.normalize_trade_date(start_date) if start_date else None
+        end = self.normalize_trade_date(end_date) if end_date else None
+        frames = []
+        fina_dir = self.tushare_root / "fina_indicator"
+        if fina_dir.exists():
+            for path in sorted(fina_dir.glob("*.csv")):
+                ann_date = path.stem
+                if len(ann_date) != 8 or not ann_date.isdigit():
+                    continue
+                if start and ann_date < start:
+                    continue
+                if end and ann_date > end:
+                    continue
+                frame = self._read_csv(path)
+                if frame.empty:
+                    continue
+                for column in ("ann_date", "end_date"):
+                    if column in frame.columns:
+                        frame[column] = self._normalize_date_series(frame[column])
+                frames.append(frame)
+
+        fina_symbol_dir = self.tushare_root / "fina_indicator_by_symbol"
+        if fina_symbol_dir.exists():
+            for path in sorted(fina_symbol_dir.glob("*.csv")):
+                frame = self._read_csv(path)
+                if frame.empty or "ann_date" not in frame.columns:
+                    continue
+                frame["ann_date"] = self._normalize_date_series(frame["ann_date"])
+                if "end_date" in frame.columns:
+                    frame["end_date"] = self._normalize_date_series(frame["end_date"])
+                if start:
+                    frame = frame.loc[frame["ann_date"] >= start]
+                if end:
+                    frame = frame.loc[frame["ann_date"] <= end]
+                if not frame.empty:
+                    frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     def load_daily_for_dates(self, trade_dates: list[str]) -> "pd.DataFrame":
         import pandas as pd
@@ -290,6 +423,24 @@ class DataRepository:
 
     def limit_list_cache_exists(self, trade_date: str) -> bool:
         return (self.tushare_root / "limit_list" / f"{trade_date}.csv").exists()
+
+    def index_daily_cache_exists(self, index_code: str) -> bool:
+        return (self.tushare_root / "index_daily" / f"{index_code}.csv").exists()
+
+    def index_daily_basic_cache_exists(self, trade_date: str) -> bool:
+        return (self.tushare_root / "index_daily_basic" / f"{trade_date}.csv").exists()
+
+    def index_classify_cache_exists(self, src: str = "SW2021") -> bool:
+        return (self.tushare_root / "index_classify" / f"{src}.csv").exists()
+
+    def index_member_all_cache_exists(self, src: str = "SW2021") -> bool:
+        return (self.tushare_root / "index_member_all" / f"{src}.csv").exists()
+
+    def fina_indicator_cache_exists(self, ann_date: str) -> bool:
+        return (self.tushare_root / "fina_indicator" / f"{ann_date}.csv").exists()
+
+    def fina_indicator_symbol_cache_exists(self, ts_code: str) -> bool:
+        return (self.tushare_root / "fina_indicator_by_symbol" / f"{ts_code}.csv").exists()
 
     def normalize_trade_date(self, value: str) -> str:
         return to_compact_date(value)

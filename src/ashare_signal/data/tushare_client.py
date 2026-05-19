@@ -21,6 +21,7 @@ def _transient_exception_types() -> tuple[type[BaseException], ...]:
 
         exception_types.extend(
             [
+                requests_exceptions.ChunkedEncodingError,
                 requests_exceptions.Timeout,
                 requests_exceptions.ConnectionError,
             ]
@@ -146,5 +147,57 @@ class TushareClient:
                 "trade_date,ts_code,industry,name,pct_chg,amount,limit_amount,"
                 "float_mv,total_mv,turnover_ratio,fd_amount,open_times,up_stat,"
                 "limit_times,limit"
+            ),
+        )
+
+    def fetch_index_daily(self, ts_code: str, start_date: str, end_date: str) -> "pd.DataFrame":
+        return self._query(
+            "index_daily",
+            ts_code=ts_code,
+            start_date=to_compact_date(start_date),
+            end_date=to_compact_date(end_date),
+            fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        )
+
+    def fetch_index_daily_basic(self, trade_date: str) -> "pd.DataFrame":
+        return self._query(
+            "index_dailybasic",
+            trade_date=to_compact_date(trade_date),
+            fields=(
+                "ts_code,trade_date,total_mv,float_mv,total_share,float_share,free_share,"
+                "turnover_rate,turnover_rate_f,pe,pe_ttm,pb"
+            ),
+        )
+
+    def fetch_index_classify(self, src: str = "SW2021") -> "pd.DataFrame":
+        return self._query("index_classify", src=src)
+
+    def fetch_index_member_all(self, src: str = "SW2021") -> "pd.DataFrame":
+        import pandas as pd
+
+        frames = []
+        offset = 0
+        limit = 3000
+        while True:
+            frame = self._query("index_member_all", is_new="Y", offset=offset, limit=limit)
+            if frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def fetch_fina_indicator(self, ts_code: str) -> "pd.DataFrame":
+        return self._query(
+            "fina_indicator",
+            ts_code=ts_code,
+            fields=(
+                "ts_code,ann_date,end_date,roe,roe_waa,roe_dt,roa,roic,"
+                "grossprofit_margin,netprofit_margin,debt_to_assets,ocf_to_or,"
+                "ocf_to_profit,basic_eps_yoy,dt_eps_yoy,op_yoy,netprofit_yoy,"
+                "dt_netprofit_yoy,ocf_yoy"
             ),
         )
