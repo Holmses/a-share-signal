@@ -12,6 +12,7 @@ from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngi
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9BacktestResult, Tianzhu9Position, Tianzhu9Trade
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
+from ashare_signal.strategy.exit_rules import TIERED_TRAILING_TAKE_PROFIT_LEVELS
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
 from ashare_signal.utils.dates import to_compact_date
 
@@ -42,6 +43,20 @@ class FullAMomentumBacktestEngine:
         take_profit_trigger_pct: float = 0.08,
         trailing_stop_drawdown_pct: float = 0.04,
         hard_exit_days: int | None = 23,
+        exit_ma20_break: bool = False,
+        exit_failure_days: int | None = 8,
+        exit_failure_min_peak_profit_pct: float = 0.03,
+        exit_adaptive_trailing: bool = False,
+        exit_atr_multiplier: float = 1.5,
+        exit_market_risk: bool = False,
+        exit_industry_weak: bool = False,
+        exit_relative_weak: bool = False,
+        exit_relative_weak_5d_pct: float = 0.04,
+        exit_relative_weak_20d_pct: float = 0.08,
+        exit_volume_stall: bool = True,
+        exit_volume_stall_ratio: float = 1.4,
+        exit_upper_shadow: bool = False,
+        exit_upper_shadow_pct: float = 0.45,
         lot_size: int | None = None,
     ) -> None:
         self.config = config
@@ -61,12 +76,70 @@ class FullAMomentumBacktestEngine:
         self.style_score_weight = float(style_score_weight)
         self.loss_cooldown_days = max(int(loss_cooldown_days), 0)
         self.hard_exit_days = max(int(hard_exit_days), 1) if hard_exit_days is not None else None
-        self.exit_strategy = (
-            "tiered_trailing_take_profit_no_hard_stop_no_time_exit"
-            if self.hard_exit_days is None
-            else f"tiered_trailing_take_profit_hard_exit_{self.hard_exit_days}d"
-        )
+        self.exit_ma20_break = bool(exit_ma20_break)
+        self.exit_failure_days = max(int(exit_failure_days), 1) if exit_failure_days else None
+        self.exit_failure_min_peak_profit_pct = float(exit_failure_min_peak_profit_pct)
+        self.exit_adaptive_trailing = bool(exit_adaptive_trailing)
+        self.exit_atr_multiplier = float(exit_atr_multiplier)
+        self.exit_market_risk = bool(exit_market_risk)
+        self.exit_industry_weak = bool(exit_industry_weak)
+        self.exit_relative_weak = bool(exit_relative_weak)
+        self.exit_relative_weak_5d_pct = float(exit_relative_weak_5d_pct)
+        self.exit_relative_weak_20d_pct = float(exit_relative_weak_20d_pct)
+        self.exit_volume_stall = bool(exit_volume_stall)
+        self.exit_volume_stall_ratio = float(exit_volume_stall_ratio)
+        self.exit_upper_shadow = bool(exit_upper_shadow)
+        self.exit_upper_shadow_pct = float(exit_upper_shadow_pct)
+        self.exit_strategy = self._exit_strategy_name()
         self.lot_size = int(lot_size or config.backtest.lot_size)
+
+    def _exit_strategy_name(self) -> str:
+        parts = ["tiered_trailing_take_profit"]
+        if self.hard_exit_days is None:
+            parts.append("no_time_exit")
+        else:
+            parts.append(f"hard_exit_{self.hard_exit_days}d")
+        if self.exit_ma20_break:
+            parts.append("ma20_break")
+        if self.exit_failure_days is not None:
+            parts.append(f"failure_{self.exit_failure_days}d")
+        if self.exit_adaptive_trailing:
+            parts.append(f"adaptive_atr_{self.exit_atr_multiplier:g}x")
+        if self.exit_market_risk:
+            parts.append("market_risk_exit")
+        if self.exit_industry_weak:
+            parts.append("industry_weak_exit")
+        if self.exit_relative_weak:
+            parts.append("relative_weak_exit")
+        if self.exit_volume_stall:
+            parts.append("volume_stall_exit")
+        if self.exit_upper_shadow:
+            parts.append("upper_shadow_exit")
+        return "_".join(parts)
+
+    def _exit_slug(self) -> str:
+        slug = f"tiered-trailing-hard{self.hard_exit_days or 'none'}"
+        if self.exit_ma20_break:
+            slug += "-ma20"
+        if self.exit_failure_days is not None:
+            failure_pct = _slug_float(self.exit_failure_min_peak_profit_pct)
+            slug += f"-fail{self.exit_failure_days}d{failure_pct}"
+        if self.exit_adaptive_trailing:
+            slug += f"-atr{_slug_float(self.exit_atr_multiplier)}"
+        if self.exit_market_risk:
+            slug += "-mktrisk"
+        if self.exit_industry_weak:
+            slug += "-indweak"
+        if self.exit_relative_weak:
+            slug += (
+                f"-relweak{_slug_float(self.exit_relative_weak_5d_pct)}"
+                f"x{_slug_float(self.exit_relative_weak_20d_pct)}"
+            )
+        if self.exit_volume_stall:
+            slug += f"-volstall{_slug_float(self.exit_volume_stall_ratio)}"
+        if self.exit_upper_shadow:
+            slug += f"-shadow{_slug_float(self.exit_upper_shadow_pct)}"
+        return slug
 
     def run(self, start_date: date | None = None, end_date: date | None = None) -> Tianzhu9BacktestResult:
         cached_dates = self.repository.complete_daily_cache_dates()
@@ -221,7 +294,7 @@ class FullAMomentumBacktestEngine:
         ).replace("-", "m").replace(".", "p")
         stem = (
             f"full-a-momentum-{self.selection_variant}-top{self.top_n}-"
-            f"{groups_slug}-exit-tiered-trailing-hard{self.hard_exit_days or 'none'}-filter-"
+            f"{groups_slug}-exit-{self._exit_slug()}-filter-"
             f"{filter_slug}-{resolved_start}-{resolved_end}"
         )
         summary_path = reports_dir / f"{stem}-summary.json"
@@ -246,11 +319,27 @@ class FullAMomentumBacktestEngine:
             "max_hold_days": self.max_hold_days,
             "exit_strategy": self.exit_strategy,
             "exit_strategy_note": (
-                "profit-only tiered trailing take-profit; no hard stop-loss, no fixed max-hold exit"
+                "tiered trailing take-profit; no hard stop-loss, no fixed max-hold exit"
                 if self.hard_exit_days is None
                 else f"tiered trailing take-profit plus hard exit after {self.hard_exit_days} trade days"
             ),
             "hard_exit_days": self.hard_exit_days,
+            "exit_rules": {
+                "ma20_break": self.exit_ma20_break,
+                "failure_days": self.exit_failure_days,
+                "failure_min_peak_profit_pct": self.exit_failure_min_peak_profit_pct,
+                "adaptive_trailing": self.exit_adaptive_trailing,
+                "atr_multiplier": self.exit_atr_multiplier,
+                "market_risk_exit": self.exit_market_risk,
+                "industry_weak_exit": self.exit_industry_weak,
+                "relative_weak_exit": self.exit_relative_weak,
+                "relative_weak_5d_pct": self.exit_relative_weak_5d_pct,
+                "relative_weak_20d_pct": self.exit_relative_weak_20d_pct,
+                "volume_stall_exit": self.exit_volume_stall,
+                "volume_stall_ratio": self.exit_volume_stall_ratio,
+                "upper_shadow_exit": self.exit_upper_shadow,
+                "upper_shadow_pct": self.exit_upper_shadow_pct,
+            },
             "max_positions": self.max_positions,
             "min_avg_amount_yuan": self.min_avg_amount_yuan,
             "market_filter": {
@@ -533,10 +622,31 @@ class FullAMomentumBacktestEngine:
                 entry_price=position.entry_price,
                 current_close=prev_close,
                 highest_price=highest_price,
+                levels=self._trailing_levels(feature),
             )
-            if not exit_check.should_exit and (
-                self.hard_exit_days is None or holding_days < self.hard_exit_days
+            should_exit = exit_check.should_exit
+            if not should_exit and self._should_exit_ma20_break(feature, holding_days):
+                should_exit = True
+            if not should_exit and self._should_exit_failure(feature, position, highest_price, holding_days):
+                should_exit = True
+            if not should_exit and self._should_exit_market_risk(
+                feature=feature,
+                holding_days=holding_days,
+                eligible_groups=eligible_groups,
+                risk_off=risk_off,
             ):
+                should_exit = True
+            if not should_exit and self._should_exit_industry_weak(feature, holding_days):
+                should_exit = True
+            if not should_exit and self._should_exit_relative_weak(feature, holding_days):
+                should_exit = True
+            if not should_exit and self._should_exit_volume_stall(feature, position, highest_price, holding_days):
+                should_exit = True
+            if not should_exit and self._should_exit_upper_shadow(feature, position, highest_price, holding_days):
+                should_exit = True
+            if not should_exit and self.hard_exit_days is not None and holding_days >= self.hard_exit_days:
+                should_exit = True
+            if not should_exit:
                 continue
 
             row = prices.loc[symbol]
@@ -579,6 +689,160 @@ class FullAMomentumBacktestEngine:
             del positions[symbol]
         return traded_value
 
+    def _trailing_levels(self, feature: pd.Series) -> tuple[tuple[float, float], ...]:
+        if not self.exit_adaptive_trailing:
+            return TIERED_TRAILING_TAKE_PROFIT_LEVELS
+        atr_pct = _safe_float(feature.get("atr_20d_pct"))
+        if atr_pct is None:
+            return TIERED_TRAILING_TAKE_PROFIT_LEVELS
+        return tuple(
+            (profit_pct, max(drawdown_pct, atr_pct * self.exit_atr_multiplier))
+            for profit_pct, drawdown_pct in TIERED_TRAILING_TAKE_PROFIT_LEVELS
+        )
+
+    def _should_exit_ma20_break(self, feature: pd.Series, holding_days: int) -> bool:
+        if not self.exit_ma20_break or holding_days < 3:
+            return False
+        close = _safe_float(feature.get("close"))
+        ma20 = _safe_float(feature.get("ma_20"))
+        return close is not None and ma20 is not None and close < ma20
+
+    def _should_exit_failure(
+        self,
+        feature: pd.Series,
+        position: Tianzhu9Position,
+        highest_price: float,
+        holding_days: int,
+    ) -> bool:
+        if self.exit_failure_days is None or holding_days < self.exit_failure_days:
+            return False
+        peak_profit = highest_price / position.entry_price - 1.0 if position.entry_price else 0.0
+        if peak_profit >= self.exit_failure_min_peak_profit_pct:
+            return False
+        close = _safe_float(feature.get("close"))
+        ma20 = _safe_float(feature.get("ma_20"))
+        return_5d = _safe_float(feature.get("return_5d"))
+        return (
+            (close is not None and ma20 is not None and close < ma20)
+            or (return_5d is not None and return_5d < 0.0)
+        )
+
+    def _should_exit_market_risk(
+        self,
+        *,
+        feature: pd.Series,
+        holding_days: int,
+        eligible_groups: set[str],
+        risk_off: bool,
+    ) -> bool:
+        if not self.exit_market_risk or holding_days < 2:
+            return False
+        style_group = str(feature.get("style_group") or feature.get("group") or "")
+        if not risk_off and (not style_group or style_group in eligible_groups):
+            return False
+        close = _safe_float(feature.get("close"))
+        ma10 = _safe_float(feature.get("ma_10"))
+        ma20 = _safe_float(feature.get("ma_20"))
+        return_5d = _safe_float(feature.get("return_5d"))
+        return (
+            (close is not None and ma10 is not None and close < ma10)
+            or (close is not None and ma20 is not None and close < ma20)
+            or (return_5d is not None and return_5d < 0.0)
+        )
+
+    def _should_exit_industry_weak(self, feature: pd.Series, holding_days: int) -> bool:
+        if not self.exit_industry_weak or holding_days < 3:
+            return False
+        style_return_20d = _safe_float(feature.get("style_return_20d_median"))
+        style_breadth = _safe_float(feature.get("style_breadth_20d"))
+        if style_return_20d is None and style_breadth is None:
+            return False
+        industry_weak = (
+            (style_return_20d is not None and style_return_20d < self.style_min_return_20d)
+            or (style_breadth is not None and style_breadth < self.style_min_breadth)
+        )
+        if not industry_weak:
+            return False
+        close = _safe_float(feature.get("close"))
+        ma10 = _safe_float(feature.get("ma_10"))
+        return_5d = _safe_float(feature.get("return_5d"))
+        return (
+            (close is not None and ma10 is not None and close < ma10)
+            or (return_5d is not None and return_5d < 0.0)
+        )
+
+    def _should_exit_relative_weak(self, feature: pd.Series, holding_days: int) -> bool:
+        if not self.exit_relative_weak or holding_days < 3:
+            return False
+        relative_5d = _safe_float(feature.get("relative_style_return_5d"))
+        relative_20d = _safe_float(feature.get("relative_style_return_20d"))
+        return_5d = _safe_float(feature.get("return_5d"))
+        close = _safe_float(feature.get("close"))
+        ma20 = _safe_float(feature.get("ma_20"))
+        short_weak = (
+            relative_5d is not None
+            and relative_5d <= -self.exit_relative_weak_5d_pct
+            and return_5d is not None
+            and return_5d < 0.0
+        )
+        medium_weak = (
+            relative_20d is not None
+            and relative_20d <= -self.exit_relative_weak_20d_pct
+            and close is not None
+            and ma20 is not None
+            and close < ma20
+        )
+        return short_weak or medium_weak
+
+    def _should_exit_volume_stall(
+        self,
+        feature: pd.Series,
+        position: Tianzhu9Position,
+        highest_price: float,
+        holding_days: int,
+    ) -> bool:
+        if not self.exit_volume_stall or holding_days < 3:
+            return False
+        peak_profit = highest_price / position.entry_price - 1.0 if position.entry_price else 0.0
+        if peak_profit < 0.05:
+            return False
+        amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
+        return_5d = _safe_float(feature.get("return_5d"))
+        close = _safe_float(feature.get("close"))
+        ma5 = _safe_float(feature.get("ma_5"))
+        upper_shadow = _safe_float(feature.get("upper_shadow_pct"))
+        return (
+            amount_ratio is not None
+            and amount_ratio >= self.exit_volume_stall_ratio
+            and return_5d is not None
+            and return_5d <= 0.02
+            and (
+                (close is not None and ma5 is not None and close < ma5)
+                or (upper_shadow is not None and upper_shadow >= 0.35)
+            )
+        )
+
+    def _should_exit_upper_shadow(
+        self,
+        feature: pd.Series,
+        position: Tianzhu9Position,
+        highest_price: float,
+        holding_days: int,
+    ) -> bool:
+        if not self.exit_upper_shadow or holding_days < 2:
+            return False
+        peak_profit = highest_price / position.entry_price - 1.0 if position.entry_price else 0.0
+        close_to_ma20 = _safe_float(feature.get("close_to_ma_20"))
+        if peak_profit < 0.08 and (close_to_ma20 is None or close_to_ma20 < 0.08):
+            return False
+        upper_shadow = _safe_float(feature.get("upper_shadow_pct"))
+        amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
+        return (
+            upper_shadow is not None
+            and upper_shadow >= self.exit_upper_shadow_pct
+            and (amount_ratio is None or amount_ratio >= 1.1)
+        )
+
     def _mark_to_market_equity(
         self,
         cash: float,
@@ -618,3 +882,17 @@ class FullAMomentumBacktestEngine:
         if rows.empty:
             return None
         return rows.iloc[0]
+
+
+def _safe_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return number
+
+
+def _slug_float(value: float) -> str:
+    return f"{float(value):g}".replace("-", "m").replace(".", "p")

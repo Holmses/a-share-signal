@@ -290,6 +290,19 @@ class SelectionEventStudyEngine:
         daily["volatility_20d"] = grouped["pct_chg_decimal"].transform(
             lambda series: series.rolling(window=20, min_periods=20).std()
         )
+        prev_close = grouped["close"].shift(1)
+        true_range = pd.concat(
+            [
+                daily["high"] - daily["low"],
+                (daily["high"] - prev_close).abs(),
+                (daily["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        daily["atr_20d"] = true_range.groupby(daily["ts_code"]).transform(
+            lambda series: series.rolling(window=20, min_periods=20).mean()
+        )
+        daily["atr_20d_pct"] = daily["atr_20d"] / daily["close"]
         daily["amount_ratio_5d"] = daily["amount_yuan"] / daily["avg_amount_5d_yuan"]
         daily["close_to_ma_5"] = daily["close"] / daily["ma_5"] - 1.0
         daily["close_to_ma_10"] = daily["close"] / daily["ma_10"] - 1.0
@@ -354,6 +367,15 @@ class SelectionEventStudyEngine:
         frame = frame.loc[base_mask].copy()
         if frame.empty:
             return frame
+
+        by_date_style = frame.groupby(["trade_date", "style_group"], group_keys=False)
+        frame["style_return_5d_median"] = by_date_style["return_5d"].transform("median")
+        frame["style_return_20d_median"] = by_date_style["return_20d"].transform("median")
+        frame["_above_ma20"] = (frame["close"] >= frame["ma_20"]).astype(float)
+        frame["style_breadth_20d"] = by_date_style["_above_ma20"].transform("mean")
+        frame = frame.drop(columns=["_above_ma20"])
+        frame["relative_style_return_5d"] = frame["return_5d"] - frame["style_return_5d_median"]
+        frame["relative_style_return_20d"] = frame["return_20d"] - frame["style_return_20d_median"]
 
         by_date_group = frame.groupby(["trade_date", "group"], group_keys=False)
         frame["return_30d_rank"] = by_date_group["return_30d"].rank(pct=True)

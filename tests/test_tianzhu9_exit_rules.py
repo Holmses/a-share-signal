@@ -42,6 +42,10 @@ def test_order_generation_uses_tiered_trailing_without_hard_stop() -> None:
                 "close": 90.0,
                 "ma_5": 95.0,
                 "ma_10": 98.0,
+                "ma_20": 85.0,
+                "return_5d": 0.02,
+                "amount_ratio_5d": 1.0,
+                "upper_shadow_pct": 0.1,
                 "group": "chinext",
             },
             {
@@ -50,6 +54,10 @@ def test_order_generation_uses_tiered_trailing_without_hard_stop() -> None:
                 "close": 105.0,
                 "ma_5": 108.0,
                 "ma_10": 109.0,
+                "ma_20": 100.0,
+                "return_5d": 0.02,
+                "amount_ratio_5d": 1.0,
+                "upper_shadow_pct": 0.1,
                 "group": "star",
             },
         ]
@@ -103,6 +111,10 @@ def test_order_generation_can_force_exit_after_trade_days() -> None:
                 "close": 90.0,
                 "ma_5": 95.0,
                 "ma_10": 98.0,
+                "ma_20": 85.0,
+                "return_5d": 0.02,
+                "amount_ratio_5d": 1.0,
+                "upper_shadow_pct": 0.1,
                 "group": "chinext",
             }
         ]
@@ -145,6 +157,113 @@ def test_order_generation_can_force_exit_after_trade_days() -> None:
     assert [order.symbol for order in sell_orders] == ["301396.SZ"]
     assert sell_orders[0].holding_days == 8
     assert sell_orders[0].reason == "硬卖出：持仓满 8 个交易日。"
+
+
+def test_order_generation_exits_failed_momentum_after_8_trade_days() -> None:
+    factor_frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "20260513",
+                "ts_code": "301396.SZ",
+                "close": 99.0,
+                "ma_5": 100.0,
+                "ma_10": 100.0,
+                "ma_20": 100.5,
+                "return_5d": -0.01,
+                "amount_ratio_5d": 1.0,
+                "upper_shadow_pct": 0.1,
+                "group": "chinext",
+            }
+        ]
+    )
+    positions = [
+        {
+            "symbol": "301396.SZ",
+            "name": "宏景科技",
+            "entry_date": "2026-05-04",
+            "entry_price": 100.0,
+            "quantity": 100,
+            "highest_close": 102.0,
+            "highest_high": 102.5,
+        }
+    ]
+
+    sell_orders, hold_orders = _build_position_orders(
+        config=_config(),
+        factor_frame=factor_frame,
+        signal_trade_date="20260513",
+        selected_symbols=set(),
+        selected_by_symbol={},
+        positions=positions,
+        hold_days=5,
+        max_hold_days=10,
+        cached_dates=[
+            "20260504",
+            "20260505",
+            "20260506",
+            "20260507",
+            "20260508",
+            "20260511",
+            "20260512",
+            "20260513",
+        ],
+        hard_exit_days=23,
+        failure_exit_days=8,
+        failure_exit_min_peak_profit_pct=0.03,
+    )
+
+    assert hold_orders == []
+    assert [order.symbol for order in sell_orders] == ["301396.SZ"]
+    assert sell_orders[0].reason.startswith("失败退出")
+
+
+def test_order_generation_exits_volume_stall_after_profit() -> None:
+    factor_frame = pd.DataFrame(
+        [
+            {
+                "trade_date": "20260513",
+                "ts_code": "301396.SZ",
+                "close": 104.0,
+                "ma_5": 105.0,
+                "ma_10": 102.0,
+                "ma_20": 100.0,
+                "return_5d": 0.01,
+                "amount_ratio_5d": 1.45,
+                "upper_shadow_pct": 0.10,
+                "group": "chinext",
+            }
+        ]
+    )
+    positions = [
+        {
+            "symbol": "301396.SZ",
+            "name": "宏景科技",
+            "entry_date": "2026-05-08",
+            "entry_price": 100.0,
+            "quantity": 100,
+            "highest_close": 106.0,
+            "highest_high": 106.0,
+        }
+    ]
+
+    sell_orders, hold_orders = _build_position_orders(
+        config=_config(),
+        factor_frame=factor_frame,
+        signal_trade_date="20260513",
+        selected_symbols=set(),
+        selected_by_symbol={},
+        positions=positions,
+        hold_days=5,
+        max_hold_days=10,
+        hard_exit_days=23,
+        failure_exit_days=8,
+        volume_stall_exit=True,
+        volume_stall_ratio=1.4,
+    )
+
+    assert hold_orders == []
+    assert [order.symbol for order in sell_orders] == ["301396.SZ"]
+    assert sell_orders[0].reason.startswith("放量滞涨退出")
 
 
 def test_format_group_list_compacts_many_industries() -> None:

@@ -43,6 +43,10 @@ def run_tianzhu9_daily_workflow(
     hold_days: int = 5,
     max_hold_days: int = 10,
     hard_exit_days: int | None = 23,
+    failure_exit_days: int | None = 8,
+    failure_exit_min_peak_profit_pct: float = 0.03,
+    volume_stall_exit: bool = True,
+    volume_stall_ratio: float = 1.4,
 ) -> Tianzhu9DailyResult:
     resolved_end_date = _parse_date(end_date) if end_date else _today(config.runtime.timezone)
     sync_result: SyncResult | None = None
@@ -83,6 +87,10 @@ def run_tianzhu9_daily_workflow(
         hold_days=hold_days,
         max_hold_days=max_hold_days,
         hard_exit_days=hard_exit_days,
+        failure_exit_days=failure_exit_days,
+        failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
+        volume_stall_exit=volume_stall_exit,
+        volume_stall_ratio=volume_stall_ratio,
     )
     broker.stage_plan(new_plan_path=plan.json_path, as_of_trade_date=data_trade_date)
     plan.markdown_path.write_text(
@@ -253,6 +261,10 @@ def run_tianzhu9_scheduler(
     hold_days: int = 5,
     max_hold_days: int = 10,
     hard_exit_days: int | None = 23,
+    failure_exit_days: int | None = 8,
+    failure_exit_min_peak_profit_pct: float = 0.03,
+    volume_stall_exit: bool = True,
+    volume_stall_ratio: float = 1.4,
 ) -> None:
     resolved_run_at = parse_run_time(run_at or config.runtime.daily_run_time)
     resolved_timezone = timezone or config.runtime.timezone
@@ -273,6 +285,10 @@ def run_tianzhu9_scheduler(
             hold_days=hold_days,
             max_hold_days=max_hold_days,
             hard_exit_days=hard_exit_days,
+            failure_exit_days=failure_exit_days,
+            failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
+            volume_stall_exit=volume_stall_exit,
+            volume_stall_ratio=volume_stall_ratio,
         )
         print(f"data_trade_date={result.data_trade_date}", flush=True)
         print(f"planned_trade_date={result.plan.planned_trade_date}", flush=True)

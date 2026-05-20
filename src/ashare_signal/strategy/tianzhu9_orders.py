@@ -56,6 +56,10 @@ def generate_tianzhu9_order_plan(
     hold_days: int = 5,
     max_hold_days: int = 10,
     hard_exit_days: int | None = 23,
+    failure_exit_days: int | None = 8,
+    failure_exit_min_peak_profit_pct: float = 0.03,
+    volume_stall_exit: bool = True,
+    volume_stall_ratio: float = 1.4,
     min_avg_amount_yuan: float = 50_000_000.0,
 ) -> Tianzhu9OrderPlan:
     requested_date = to_compact_date(as_of or date.today())
@@ -144,6 +148,10 @@ def generate_tianzhu9_order_plan(
         hold_days=hold_days,
         max_hold_days=max_hold_days,
         hard_exit_days=hard_exit_days,
+        failure_exit_days=failure_exit_days,
+        failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
+        volume_stall_exit=volume_stall_exit,
+        volume_stall_ratio=volume_stall_ratio,
         risk_off=risk_off,
         eligible_groups=eligible_groups,
     )
@@ -169,11 +177,17 @@ def generate_tianzhu9_order_plan(
     if hard_exit_days is None:
         notes.append(
             "卖出规则：不使用硬止损/固定持有天数退出，"
-            "仅在盈利后触发 8%/4%、12%/6%、20%/8% 分层追踪止盈。"
+            "先执行盈利后分层追踪止盈，"
+            f"持仓满 {failure_exit_days} 个交易日且最高浮盈不足 {failure_exit_min_peak_profit_pct:.0%} "
+            "并转弱时失败退出，"
+            f"最高浮盈超过 5% 后出现 {volume_stall_ratio:.1f} 倍放量滞涨时退出。"
         )
     else:
         notes.append(
             "卖出规则：不使用硬止损，先执行盈利后分层追踪止盈，"
+            f"持仓满 {failure_exit_days} 个交易日且最高浮盈不足 {failure_exit_min_peak_profit_pct:.0%} "
+            "并转弱时失败退出，"
+            f"最高浮盈超过 5% 后出现 {volume_stall_ratio:.1f} 倍放量滞涨时退出，"
             f"未触发止盈则持仓满 {hard_exit_days} 个交易日硬卖出。"
         )
 
@@ -285,6 +299,10 @@ def _build_position_orders(
     max_hold_days: int,
     cached_dates: list[str] | None = None,
     hard_exit_days: int | None = None,
+    failure_exit_days: int | None = 8,
+    failure_exit_min_peak_profit_pct: float = 0.03,
+    volume_stall_exit: bool = True,
+    volume_stall_ratio: float = 1.4,
     risk_off: bool = False,
     eligible_groups: set[str] | None = None,
 ) -> tuple[list[Tianzhu9Order], list[Tianzhu9Order]]:
@@ -338,6 +356,37 @@ def _build_position_orders(
                 f"最高浮盈 {exit_check.peak_profit_pct:.2%}，"
                 f"从高点回撤 {exit_check.drawdown_from_peak_pct:.2%}，"
                 f"触发 {exit_check.trigger_profit_pct:.0%}/{exit_check.trigger_drawdown_pct:.0%} 档。"
+            )
+        elif _should_failure_exit(
+            feature=feature,
+            entry_price=entry_price,
+            highest_price=highest_price,
+            holding_days=holding_days,
+            failure_exit_days=failure_exit_days,
+            failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
+        ):
+            peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+            reason = (
+                "失败退出："
+                f"持仓 {holding_days} 个交易日，最高浮盈 {peak_profit:.2%} "
+                f"未达到 {failure_exit_min_peak_profit_pct:.0%}，且跌破 MA20 或近 5 日转弱。"
+            )
+        elif _should_volume_stall_exit(
+            feature=feature,
+            entry_price=entry_price,
+            highest_price=highest_price,
+            holding_days=holding_days,
+            volume_stall_exit=volume_stall_exit,
+            volume_stall_ratio=volume_stall_ratio,
+        ):
+            amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
+            return_5d = _safe_float(feature.get("return_5d"))
+            peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+            reason = (
+                "放量滞涨退出："
+                f"最高浮盈 {peak_profit:.2%}，"
+                f"5日量能比 {amount_ratio or 0.0:.2f}，"
+                f"5日涨幅 {return_5d or 0.0:.2%}。"
             )
         elif hard_exit_days is not None and holding_days >= hard_exit_days:
             reason = f"硬卖出：持仓满 {hard_exit_days} 个交易日。"
@@ -399,6 +448,70 @@ def _holding_trade_days(
             return cached_dates.index(signal_trade_date) - cached_dates.index(eligible_entries[0]) + 1
     signal_day = parse_compact_date(signal_trade_date)
     return max((signal_day - entry_date).days + 1, 1)
+
+
+def _should_failure_exit(
+    *,
+    feature,
+    entry_price: float,
+    highest_price: float,
+    holding_days: int,
+    failure_exit_days: int | None,
+    failure_exit_min_peak_profit_pct: float,
+) -> bool:
+    if failure_exit_days is None or holding_days < int(failure_exit_days):
+        return False
+    peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+    if peak_profit >= float(failure_exit_min_peak_profit_pct):
+        return False
+    close = _safe_float(feature.get("close"))
+    ma20 = _safe_float(feature.get("ma_20"))
+    return_5d = _safe_float(feature.get("return_5d"))
+    return (
+        (close is not None and ma20 is not None and close < ma20)
+        or (return_5d is not None and return_5d < 0.0)
+    )
+
+
+def _should_volume_stall_exit(
+    *,
+    feature,
+    entry_price: float,
+    highest_price: float,
+    holding_days: int,
+    volume_stall_exit: bool,
+    volume_stall_ratio: float,
+) -> bool:
+    if not volume_stall_exit or holding_days < 3:
+        return False
+    peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+    if peak_profit < 0.05:
+        return False
+    amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
+    return_5d = _safe_float(feature.get("return_5d"))
+    close = _safe_float(feature.get("close"))
+    ma5 = _safe_float(feature.get("ma_5"))
+    upper_shadow = _safe_float(feature.get("upper_shadow_pct"))
+    return (
+        amount_ratio is not None
+        and amount_ratio >= float(volume_stall_ratio)
+        and return_5d is not None
+        and return_5d <= 0.02
+        and (
+            (close is not None and ma5 is not None and close < ma5)
+            or (upper_shadow is not None and upper_shadow >= 0.35)
+        )
+    )
+
+
+def _safe_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(number):
+        return None
+    return number
 
 
 def _load_tianzhu9_positions(path: Path) -> list[dict]:

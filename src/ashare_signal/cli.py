@@ -271,6 +271,21 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
     full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
     full_a_momentum.add_argument("--hard-exit-days", type=int, default=23)
+    full_a_momentum.add_argument("--exit-ma20-break", action="store_true")
+    full_a_momentum.add_argument("--exit-failure-days", type=int, default=8)
+    full_a_momentum.add_argument("--exit-failure-min-peak-profit-pct", type=float, default=0.03)
+    full_a_momentum.add_argument("--exit-adaptive-trailing", action="store_true")
+    full_a_momentum.add_argument("--exit-atr-multiplier", type=float, default=1.5)
+    full_a_momentum.add_argument("--exit-market-risk", action="store_true")
+    full_a_momentum.add_argument("--exit-industry-weak", action="store_true")
+    full_a_momentum.add_argument("--exit-relative-weak", action="store_true")
+    full_a_momentum.add_argument("--exit-relative-weak-5d-pct", type=float, default=0.04)
+    full_a_momentum.add_argument("--exit-relative-weak-20d-pct", type=float, default=0.08)
+    full_a_momentum.add_argument("--exit-volume-stall", action="store_true", default=True)
+    full_a_momentum.add_argument("--no-exit-volume-stall", dest="exit_volume_stall", action="store_false")
+    full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=1.4)
+    full_a_momentum.add_argument("--exit-upper-shadow", action="store_true")
+    full_a_momentum.add_argument("--exit-upper-shadow-pct", type=float, default=0.45)
 
     tianzhu9_orders = subparsers.add_parser(
         "generate-tianzhu9-orders",
@@ -287,6 +302,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_orders.add_argument("--hold-days", type=int, default=5)
     tianzhu9_orders.add_argument("--max-hold-days", type=int, default=10)
     tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_orders.add_argument("--failure-exit-days", type=int, default=8)
+    tianzhu9_orders.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
+    tianzhu9_orders.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_orders.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
+    tianzhu9_orders.add_argument("--volume-stall-ratio", type=float, default=1.4)
 
     tianzhu9_daily = subparsers.add_parser(
         "run-tianzhu9-daily",
@@ -302,6 +322,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_daily.add_argument("--hold-days", type=int, default=5)
     tianzhu9_daily.add_argument("--max-hold-days", type=int, default=10)
     tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_daily.add_argument("--failure-exit-days", type=int, default=8)
+    tianzhu9_daily.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
+    tianzhu9_daily.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_daily.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
+    tianzhu9_daily.add_argument("--volume-stall-ratio", type=float, default=1.4)
 
     tianzhu9_scheduler = subparsers.add_parser(
         "run-tianzhu9-scheduler",
@@ -319,6 +344,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_scheduler.add_argument("--hold-days", type=int, default=5)
     tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=10)
     tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_scheduler.add_argument("--failure-exit-days", type=int, default=8)
+    tianzhu9_scheduler.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
+    tianzhu9_scheduler.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_scheduler.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
+    tianzhu9_scheduler.add_argument("--volume-stall-ratio", type=float, default=1.4)
 
     run_daily = subparsers.add_parser(
         "run-daily",
@@ -639,6 +669,20 @@ def main() -> int:
                 style_min_return_20d=args.style_min_return_20d,
                 style_score_weight=args.style_score_weight,
                 hard_exit_days=args.hard_exit_days,
+                exit_ma20_break=args.exit_ma20_break,
+                exit_failure_days=args.exit_failure_days,
+                exit_failure_min_peak_profit_pct=args.exit_failure_min_peak_profit_pct,
+                exit_adaptive_trailing=args.exit_adaptive_trailing,
+                exit_atr_multiplier=args.exit_atr_multiplier,
+                exit_market_risk=args.exit_market_risk,
+                exit_industry_weak=args.exit_industry_weak,
+                exit_relative_weak=args.exit_relative_weak,
+                exit_relative_weak_5d_pct=args.exit_relative_weak_5d_pct,
+                exit_relative_weak_20d_pct=args.exit_relative_weak_20d_pct,
+                exit_volume_stall=args.exit_volume_stall,
+                exit_volume_stall_ratio=args.exit_volume_stall_ratio,
+                exit_upper_shadow=args.exit_upper_shadow,
+                exit_upper_shadow_pct=args.exit_upper_shadow_pct,
             ).run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,
                 end_date=_parse_date(args.end_date) if args.end_date else None,
@@ -716,6 +760,10 @@ def main() -> int:
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
                 hard_exit_days=args.hard_exit_days,
+                failure_exit_days=args.failure_exit_days,
+                failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,
+                volume_stall_exit=args.volume_stall_exit,
+                volume_stall_ratio=args.volume_stall_ratio,
             )
         except (FileNotFoundError, ValueError) as error:
             parser.exit(1, f"{error}\n")
@@ -744,6 +792,10 @@ def main() -> int:
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
                 hard_exit_days=args.hard_exit_days,
+                failure_exit_days=args.failure_exit_days,
+                failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,
+                volume_stall_exit=args.volume_stall_exit,
+                volume_stall_ratio=args.volume_stall_ratio,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)
@@ -853,6 +905,10 @@ def main() -> int:
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
                 hard_exit_days=args.hard_exit_days,
+                failure_exit_days=args.failure_exit_days,
+                failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,
+                volume_stall_exit=args.volume_stall_exit,
+                volume_stall_ratio=args.volume_stall_ratio,
             )
         except ModuleNotFoundError as error:
             _handle_missing_dependency(parser, error)
