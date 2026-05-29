@@ -12,7 +12,9 @@ from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngi
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9BacktestResult, Tianzhu9Position, Tianzhu9Trade
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.strategy.exit_rules import TIERED_TRAILING_TAKE_PROFIT_LEVELS
+from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, TIERED_TRAILING_TAKE_PROFIT_LEVELS
+from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
 from ashare_signal.utils.dates import to_compact_date
 
@@ -42,9 +44,9 @@ class FullAMomentumBacktestEngine:
         stop_loss_pct: float = 0.05,
         take_profit_trigger_pct: float = 0.08,
         trailing_stop_drawdown_pct: float = 0.04,
-        hard_exit_days: int | None = 23,
+        hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
         exit_ma20_break: bool = False,
-        exit_failure_days: int | None = 8,
+        exit_failure_days: int | None = None,
         exit_failure_min_peak_profit_pct: float = 0.03,
         exit_adaptive_trailing: bool = False,
         exit_atr_multiplier: float = 1.5,
@@ -53,10 +55,11 @@ class FullAMomentumBacktestEngine:
         exit_relative_weak: bool = False,
         exit_relative_weak_5d_pct: float = 0.04,
         exit_relative_weak_20d_pct: float = 0.08,
-        exit_volume_stall: bool = True,
+        exit_volume_stall: bool = False,
         exit_volume_stall_ratio: float = 1.4,
         exit_upper_shadow: bool = False,
         exit_upper_shadow_pct: float = 0.45,
+        exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
         lot_size: int | None = None,
     ) -> None:
         self.config = config
@@ -75,6 +78,9 @@ class FullAMomentumBacktestEngine:
         self.style_min_return_20d = float(style_min_return_20d)
         self.style_score_weight = float(style_score_weight)
         self.loss_cooldown_days = max(int(loss_cooldown_days), 0)
+        if exit_profile not in EXIT_PROFILES:
+            raise ValueError(f"exit_profile must be one of: {', '.join(EXIT_PROFILES)}")
+        self.exit_profile = exit_profile
         self.hard_exit_days = max(int(hard_exit_days), 1) if hard_exit_days is not None else None
         self.exit_ma20_break = bool(exit_ma20_break)
         self.exit_failure_days = max(int(exit_failure_days), 1) if exit_failure_days else None
@@ -94,6 +100,8 @@ class FullAMomentumBacktestEngine:
         self.lot_size = int(lot_size or config.backtest.lot_size)
 
     def _exit_strategy_name(self) -> str:
+        if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+            return SLOW_PROFIT_LOCK_PROFILE
         parts = ["tiered_trailing_take_profit"]
         if self.hard_exit_days is None:
             parts.append("no_time_exit")
@@ -118,6 +126,8 @@ class FullAMomentumBacktestEngine:
         return "_".join(parts)
 
     def _exit_slug(self) -> str:
+        if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+            return "slow-profit-lock"
         slug = f"tiered-trailing-hard{self.hard_exit_days or 'none'}"
         if self.exit_ma20_break:
             slug += "-ma20"
@@ -319,10 +329,20 @@ class FullAMomentumBacktestEngine:
             "max_hold_days": self.max_hold_days,
             "exit_strategy": self.exit_strategy,
             "exit_strategy_note": (
-                "tiered trailing take-profit; no hard stop-loss, no fixed max-hold exit"
+                (
+                    "slow profit lock: delayed trailing take-profit, MA20/MA60/style weakness exits, "
+                    + (
+                        "and no fixed max-hold cap"
+                        if self.hard_exit_days is None
+                        else f"and {self.hard_exit_days}-day cap"
+                    )
+                )
+                if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE
+                else "tiered trailing take-profit; no hard stop-loss, no fixed max-hold exit"
                 if self.hard_exit_days is None
                 else f"tiered trailing take-profit plus hard exit after {self.hard_exit_days} trade days"
             ),
+            "exit_profile": self.exit_profile,
             "hard_exit_days": self.hard_exit_days,
             "exit_rules": {
                 "ma20_break": self.exit_ma20_break,
@@ -618,34 +638,54 @@ class FullAMomentumBacktestEngine:
                 continue
             prev_close = float(feature["close"])
             highest_price = max(position.highest_close, position.highest_high or 0.0)
-            exit_check = tiered_trailing_take_profit(
-                entry_price=position.entry_price,
-                current_close=prev_close,
-                highest_price=highest_price,
-                levels=self._trailing_levels(feature),
-            )
-            should_exit = exit_check.should_exit
-            if not should_exit and self._should_exit_ma20_break(feature, holding_days):
-                should_exit = True
-            if not should_exit and self._should_exit_failure(feature, position, highest_price, holding_days):
-                should_exit = True
-            if not should_exit and self._should_exit_market_risk(
-                feature=feature,
-                holding_days=holding_days,
-                eligible_groups=eligible_groups,
-                risk_off=risk_off,
-            ):
-                should_exit = True
-            if not should_exit and self._should_exit_industry_weak(feature, holding_days):
-                should_exit = True
-            if not should_exit and self._should_exit_relative_weak(feature, holding_days):
-                should_exit = True
-            if not should_exit and self._should_exit_volume_stall(feature, position, highest_price, holding_days):
-                should_exit = True
-            if not should_exit and self._should_exit_upper_shadow(feature, position, highest_price, holding_days):
-                should_exit = True
-            if not should_exit and self.hard_exit_days is not None and holding_days >= self.hard_exit_days:
-                should_exit = True
+            if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+                profile_exit = slow_profit_lock_exit_signal(
+                    entry_price=position.entry_price,
+                    current_close=prev_close,
+                    highest_price=highest_price,
+                    holding_days=holding_days,
+                    ma20=_safe_float(feature.get("ma_20")),
+                    ma60=_safe_float(feature.get("ma_60")),
+                    return_5d=_safe_float(feature.get("return_5d")),
+                    style_return_20d=_safe_float(feature.get("style_return_20d_median")),
+                    style_breadth_20d=_safe_float(feature.get("style_breadth_20d")),
+                    hard_exit_days=self.hard_exit_days,
+                )
+                should_exit = profile_exit.should_exit
+            else:
+                exit_check = tiered_trailing_take_profit(
+                    entry_price=position.entry_price,
+                    current_close=prev_close,
+                    highest_price=highest_price,
+                    levels=self._trailing_levels(feature),
+                )
+                should_exit = exit_check.should_exit
+                if not should_exit and self._should_exit_ma20_break(feature, holding_days):
+                    should_exit = True
+                if not should_exit and self._should_exit_failure(feature, position, highest_price, holding_days):
+                    should_exit = True
+                if not should_exit and self._should_exit_market_risk(
+                    feature=feature,
+                    holding_days=holding_days,
+                    eligible_groups=eligible_groups,
+                    risk_off=risk_off,
+                ):
+                    should_exit = True
+                if not should_exit and self._should_exit_industry_weak(feature, holding_days):
+                    should_exit = True
+                if not should_exit and self._should_exit_relative_weak(feature, holding_days):
+                    should_exit = True
+                if not should_exit and self._should_exit_volume_stall(feature, position, highest_price, holding_days):
+                    should_exit = True
+                if not should_exit and self._should_exit_upper_shadow(feature, position, highest_price, holding_days):
+                    should_exit = True
+                if (
+                    not should_exit
+                    and self.exit_profile == LEGACY_EXIT_PROFILE
+                    and self.hard_exit_days is not None
+                    and holding_days >= self.hard_exit_days
+                ):
+                    should_exit = True
             if not should_exit:
                 continue
 

@@ -15,6 +15,7 @@ from ashare_signal.portfolio.manager import PortfolioManager
 from ashare_signal.scheduler.daily import run_daily_workflow, run_scheduler
 from ashare_signal.scheduler.jobs import run_daily_signal_job
 from ashare_signal.scheduler.tianzhu9_daily import run_tianzhu9_daily_workflow, run_tianzhu9_scheduler
+from ashare_signal.strategy.exit_rules import EXIT_PROFILES, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS, SLOW_PROFIT_LOCK_PROFILE
 from ashare_signal.strategy.tianzhu9_orders import generate_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date
 
@@ -270,7 +271,8 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--style-min-breadth", type=float, default=0.48)
     full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
     full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
-    full_a_momentum.add_argument("--hard-exit-days", type=int, default=23)
+    full_a_momentum.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
+    full_a_momentum.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
     full_a_momentum.add_argument("--exit-ma20-break", action="store_true")
     full_a_momentum.add_argument("--exit-failure-days", type=int, default=8)
     full_a_momentum.add_argument("--exit-failure-min-peak-profit-pct", type=float, default=0.03)
@@ -301,7 +303,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_orders.add_argument("--top-n", type=int, default=5)
     tianzhu9_orders.add_argument("--hold-days", type=int, default=5)
     tianzhu9_orders.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_orders.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
+    tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
     tianzhu9_orders.add_argument("--failure-exit-days", type=int, default=8)
     tianzhu9_orders.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
     tianzhu9_orders.add_argument("--volume-stall-exit", action="store_true", default=True)
@@ -321,7 +324,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_daily.add_argument("--top-n", type=int, default=5)
     tianzhu9_daily.add_argument("--hold-days", type=int, default=5)
     tianzhu9_daily.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_daily.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
+    tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
     tianzhu9_daily.add_argument("--failure-exit-days", type=int, default=8)
     tianzhu9_daily.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
     tianzhu9_daily.add_argument("--volume-stall-exit", action="store_true", default=True)
@@ -343,7 +347,8 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_scheduler.add_argument("--top-n", type=int, default=5)
     tianzhu9_scheduler.add_argument("--hold-days", type=int, default=5)
     tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=23)
+    tianzhu9_scheduler.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
+    tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
     tianzhu9_scheduler.add_argument("--failure-exit-days", type=int, default=8)
     tianzhu9_scheduler.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
     tianzhu9_scheduler.add_argument("--volume-stall-exit", action="store_true", default=True)
@@ -683,6 +688,7 @@ def main() -> int:
                 exit_volume_stall_ratio=args.exit_volume_stall_ratio,
                 exit_upper_shadow=args.exit_upper_shadow,
                 exit_upper_shadow_pct=args.exit_upper_shadow_pct,
+                exit_profile=args.exit_profile,
             ).run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,
                 end_date=_parse_date(args.end_date) if args.end_date else None,
@@ -759,6 +765,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                exit_profile=args.exit_profile,
                 hard_exit_days=args.hard_exit_days,
                 failure_exit_days=args.failure_exit_days,
                 failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,
@@ -791,6 +798,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                exit_profile=args.exit_profile,
                 hard_exit_days=args.hard_exit_days,
                 failure_exit_days=args.failure_exit_days,
                 failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,
@@ -904,6 +912,7 @@ def main() -> int:
                 top_n=args.top_n,
                 hold_days=args.hold_days,
                 max_hold_days=args.max_hold_days,
+                exit_profile=args.exit_profile,
                 hard_exit_days=args.hard_exit_days,
                 failure_exit_days=args.failure_exit_days,
                 failure_exit_min_peak_profit_pct=args.failure_exit_min_peak_profit_pct,

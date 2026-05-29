@@ -12,7 +12,9 @@ from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
+from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, SlowProfitLockExit
+from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal, tiered_trailing_take_profit
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
@@ -55,13 +57,17 @@ def generate_tianzhu9_order_plan(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
-    hard_exit_days: int | None = 23,
+    exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
+    hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
     failure_exit_days: int | None = 8,
     failure_exit_min_peak_profit_pct: float = 0.03,
     volume_stall_exit: bool = True,
     volume_stall_ratio: float = 1.4,
     min_avg_amount_yuan: float = 50_000_000.0,
 ) -> Tianzhu9OrderPlan:
+    if exit_profile not in EXIT_PROFILES:
+        raise ValueError(f"exit_profile must be one of: {', '.join(EXIT_PROFILES)}")
+
     requested_date = to_compact_date(as_of or date.today())
     signal_trade_date = repository.resolve_trade_date(requested_date)
     planned_trade_date = repository.next_open_trade_date(signal_trade_date)
@@ -115,6 +121,8 @@ def generate_tianzhu9_order_plan(
         market_min_return_20d=0.0,
         style_min_breadth=0.48,
         style_min_return_20d=-0.01,
+        exit_profile=exit_profile,
+        hard_exit_days=hard_exit_days,
     )
     factor_frame = selection_engine._build_factor_frame(feature_dates)
     signal_frame = factor_frame.loc[factor_frame["trade_date"].astype(str) == signal_trade_date].copy()
@@ -147,6 +155,7 @@ def generate_tianzhu9_order_plan(
         cached_dates=cached_dates,
         hold_days=hold_days,
         max_hold_days=max_hold_days,
+        exit_profile=exit_profile,
         hard_exit_days=hard_exit_days,
         failure_exit_days=failure_exit_days,
         failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
@@ -174,7 +183,17 @@ def generate_tianzhu9_order_plan(
         notes.append("未发现 Tianzhu9 持仓文件或持仓为空，本次只生成买入计划。")
     if not selected:
         notes.append("今日未选出符合全 A 严格过滤条件的目标，或市场/风格过滤未通过。")
-    if hard_exit_days is None:
+    if exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+        notes.append(
+            "卖出规则：基础策略 slow_profit_lock，"
+            "持仓满 8 个交易日后才允许 30%/20%/12% 浮盈分层锁利，"
+            "分别按 12%/8%/5% 高点回撤退出；"
+            "持仓满 12 个交易日后跌破 MA20 且近 5 日转弱退出，"
+            "满 20 个交易日后跌破 MA60 退出，"
+            "风格收益和广度同步转弱时退出，"
+            f"最长持仓 {hard_exit_days} 个交易日。"
+        )
+    elif hard_exit_days is None:
         notes.append(
             "卖出规则：不使用硬止损/固定持有天数退出，"
             "先执行盈利后分层追踪止盈，"
@@ -298,6 +317,7 @@ def _build_position_orders(
     hold_days: int,
     max_hold_days: int,
     cached_dates: list[str] | None = None,
+    exit_profile: str = LEGACY_EXIT_PROFILE,
     hard_exit_days: int | None = None,
     failure_exit_days: int | None = 8,
     failure_exit_min_peak_profit_pct: float = 0.03,
@@ -306,6 +326,9 @@ def _build_position_orders(
     risk_off: bool = False,
     eligible_groups: set[str] | None = None,
 ) -> tuple[list[Tianzhu9Order], list[Tianzhu9Order]]:
+    if exit_profile not in EXIT_PROFILES:
+        raise ValueError(f"exit_profile must be one of: {', '.join(EXIT_PROFILES)}")
+
     sell_orders: list[Tianzhu9Order] = []
     hold_orders: list[Tianzhu9Order] = []
     for position in positions:
@@ -345,51 +368,67 @@ def _build_position_orders(
         unrealized_return = (prev_close / entry_price - 1.0) if entry_price else None
 
         reason = None
-        exit_check = tiered_trailing_take_profit(
-            entry_price=entry_price,
-            current_close=prev_close,
-            highest_price=highest_price,
-        )
-        if exit_check.should_exit:
-            reason = (
-                "分层追踪止盈："
-                f"最高浮盈 {exit_check.peak_profit_pct:.2%}，"
-                f"从高点回撤 {exit_check.drawdown_from_peak_pct:.2%}，"
-                f"触发 {exit_check.trigger_profit_pct:.0%}/{exit_check.trigger_drawdown_pct:.0%} 档。"
+        if exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+            exit_signal = slow_profit_lock_exit_signal(
+                entry_price=entry_price,
+                current_close=prev_close,
+                highest_price=highest_price,
+                holding_days=holding_days,
+                ma20=_safe_float(feature.get("ma_20")),
+                ma60=_safe_float(feature.get("ma_60")),
+                return_5d=_safe_float(feature.get("return_5d")),
+                style_return_20d=_safe_float(feature.get("style_return_20d_median")),
+                style_breadth_20d=_safe_float(feature.get("style_breadth_20d")),
+                hard_exit_days=hard_exit_days,
             )
-        elif _should_failure_exit(
-            feature=feature,
-            entry_price=entry_price,
-            highest_price=highest_price,
-            holding_days=holding_days,
-            failure_exit_days=failure_exit_days,
-            failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
-        ):
-            peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
-            reason = (
-                "失败退出："
-                f"持仓 {holding_days} 个交易日，最高浮盈 {peak_profit:.2%} "
-                f"未达到 {failure_exit_min_peak_profit_pct:.0%}，且跌破 MA20 或近 5 日转弱。"
+            if exit_signal.should_exit:
+                reason = _format_slow_profit_lock_reason(exit_signal, holding_days)
+        elif exit_profile == LEGACY_EXIT_PROFILE:
+            exit_check = tiered_trailing_take_profit(
+                entry_price=entry_price,
+                current_close=prev_close,
+                highest_price=highest_price,
             )
-        elif _should_volume_stall_exit(
-            feature=feature,
-            entry_price=entry_price,
-            highest_price=highest_price,
-            holding_days=holding_days,
-            volume_stall_exit=volume_stall_exit,
-            volume_stall_ratio=volume_stall_ratio,
-        ):
-            amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
-            return_5d = _safe_float(feature.get("return_5d"))
-            peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
-            reason = (
-                "放量滞涨退出："
-                f"最高浮盈 {peak_profit:.2%}，"
-                f"5日量能比 {amount_ratio or 0.0:.2f}，"
-                f"5日涨幅 {return_5d or 0.0:.2%}。"
-            )
-        elif hard_exit_days is not None and holding_days >= hard_exit_days:
-            reason = f"硬卖出：持仓满 {hard_exit_days} 个交易日。"
+            if exit_check.should_exit:
+                reason = (
+                    "分层追踪止盈："
+                    f"最高浮盈 {exit_check.peak_profit_pct:.2%}，"
+                    f"从高点回撤 {exit_check.drawdown_from_peak_pct:.2%}，"
+                    f"触发 {exit_check.trigger_profit_pct:.0%}/{exit_check.trigger_drawdown_pct:.0%} 档。"
+                )
+            elif _should_failure_exit(
+                feature=feature,
+                entry_price=entry_price,
+                highest_price=highest_price,
+                holding_days=holding_days,
+                failure_exit_days=failure_exit_days,
+                failure_exit_min_peak_profit_pct=failure_exit_min_peak_profit_pct,
+            ):
+                peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+                reason = (
+                    "失败退出："
+                    f"持仓 {holding_days} 个交易日，最高浮盈 {peak_profit:.2%} "
+                    f"未达到 {failure_exit_min_peak_profit_pct:.0%}，且跌破 MA20 或近 5 日转弱。"
+                )
+            elif _should_volume_stall_exit(
+                feature=feature,
+                entry_price=entry_price,
+                highest_price=highest_price,
+                holding_days=holding_days,
+                volume_stall_exit=volume_stall_exit,
+                volume_stall_ratio=volume_stall_ratio,
+            ):
+                amount_ratio = _safe_float(feature.get("amount_ratio_5d"))
+                return_5d = _safe_float(feature.get("return_5d"))
+                peak_profit = highest_price / entry_price - 1.0 if entry_price else 0.0
+                reason = (
+                    "放量滞涨退出："
+                    f"最高浮盈 {peak_profit:.2%}，"
+                    f"5日量能比 {amount_ratio or 0.0:.2f}，"
+                    f"5日涨幅 {return_5d or 0.0:.2%}。"
+                )
+            elif hard_exit_days is not None and holding_days >= hard_exit_days:
+                reason = f"硬卖出：持仓满 {hard_exit_days} 个交易日。"
 
         if reason:
             limit_price = round(prev_close * (1 - config.pricing.sell_markdown), 2)
@@ -409,10 +448,11 @@ def _build_position_orders(
                 )
             )
         else:
+            exit_name = "slow_profit_lock" if exit_profile == SLOW_PROFIT_LOCK_PROFILE else "分层追踪止盈"
             if symbol in selected_symbols:
-                reason = "今日重复入选，未触发分层追踪止盈。"
+                reason = f"今日重复入选，未触发{exit_name}退出。"
             else:
-                reason = f"未触发分层追踪止盈，当前持有 {holding_days} 天。"
+                reason = f"未触发{exit_name}退出，当前持有 {holding_days} 天。"
             hold_orders.append(
                 _position_order(
                     "HOLD",
@@ -502,6 +542,27 @@ def _should_volume_stall_exit(
             or (upper_shadow is not None and upper_shadow >= 0.35)
         )
     )
+
+
+def _format_slow_profit_lock_reason(signal: SlowProfitLockExit, holding_days: int) -> str:
+    if signal.reason == "slow_profit_lock_trailing" and signal.trailing_exit is not None:
+        trailing = signal.trailing_exit
+        return (
+            "慢速利润锁定-分层追踪止盈："
+            f"持仓 {holding_days} 个交易日，"
+            f"最高浮盈 {trailing.peak_profit_pct:.2%}，"
+            f"从高点回撤 {trailing.drawdown_from_peak_pct:.2%}，"
+            f"触发 {trailing.trigger_profit_pct:.0%}/{trailing.trigger_drawdown_pct:.0%} 档。"
+        )
+    if signal.reason == "slow_profit_lock_ma20_weak":
+        return f"慢速利润锁定-MA20 转弱：持仓 {holding_days} 个交易日，跌破 MA20 且近 5 日转弱。"
+    if signal.reason == "slow_profit_lock_ma60":
+        return f"慢速利润锁定-MA60 破位：持仓 {holding_days} 个交易日，收盘跌破 MA60。"
+    if signal.reason == "slow_profit_lock_style_weak":
+        return f"慢速利润锁定-风格转弱：持仓 {holding_days} 个交易日，风格收益和广度同步转弱。"
+    if signal.reason == "slow_profit_lock_hard60":
+        return f"慢速利润锁定-硬退出：持仓满 {holding_days} 个交易日。"
+    return f"慢速利润锁定退出：持仓 {holding_days} 个交易日。"
 
 
 def _safe_float(value) -> float | None:
