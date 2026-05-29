@@ -14,11 +14,7 @@ data/positions/*
 reports/generated/*
 logs/*
 !data/raw/.gitkeep
-!data/raw/tushare/
-!data/raw/tushare/**
 !data/processed/.gitkeep
-!data/processed/universe/
-!data/processed/universe/**
 !data/positions/.gitkeep
 !reports/generated/.gitkeep
 !logs/.gitkeep
