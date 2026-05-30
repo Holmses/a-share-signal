@@ -12,7 +12,10 @@ from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngi
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9BacktestResult, Tianzhu9Position, Tianzhu9Trade
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_EXIT_PROFILE, DEFAULT_FAILURE_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT, DEFAULT_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT_VOLUME_STALL_RATIO
+from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE
 from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, TIERED_TRAILING_TAKE_PROFIT_LEVELS
 from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
@@ -44,10 +47,10 @@ class FullAMomentumBacktestEngine:
         stop_loss_pct: float = 0.05,
         take_profit_trigger_pct: float = 0.08,
         trailing_stop_drawdown_pct: float = 0.04,
-        hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
+        hard_exit_days: int | None = DEFAULT_HARD_EXIT_DAYS,
         exit_ma20_break: bool = False,
-        exit_failure_days: int | None = None,
-        exit_failure_min_peak_profit_pct: float = 0.03,
+        exit_failure_days: int | None = DEFAULT_FAILURE_EXIT_DAYS,
+        exit_failure_min_peak_profit_pct: float = DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
         exit_adaptive_trailing: bool = False,
         exit_atr_multiplier: float = 1.5,
         exit_market_risk: bool = False,
@@ -55,11 +58,11 @@ class FullAMomentumBacktestEngine:
         exit_relative_weak: bool = False,
         exit_relative_weak_5d_pct: float = 0.04,
         exit_relative_weak_20d_pct: float = 0.08,
-        exit_volume_stall: bool = False,
-        exit_volume_stall_ratio: float = 1.4,
+        exit_volume_stall: bool = DEFAULT_VOLUME_STALL_EXIT,
+        exit_volume_stall_ratio: float = DEFAULT_VOLUME_STALL_RATIO,
         exit_upper_shadow: bool = False,
         exit_upper_shadow_pct: float = 0.45,
-        exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
+        exit_profile: str = DEFAULT_EXIT_PROFILE,
         lot_size: int | None = None,
     ) -> None:
         self.config = config

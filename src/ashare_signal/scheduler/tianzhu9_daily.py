@@ -16,7 +16,9 @@ from ashare_signal.notify.feishu import FeishuSendResult, FeishuWebhookNotifier
 from ashare_signal.portfolio.tianzhu9_simulator import Tianzhu9PaperBroker, Tianzhu9SimulationResult
 from ashare_signal.scheduler.daily import _calendar_end_date, _parse_date, _resolve_sync_start_date, _today
 from ashare_signal.scheduler.daily import next_run_datetime, parse_run_time
-from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_HARD_EXIT_DAYS, SLOW_PROFIT_LOCK_PROFILE
+from ashare_signal.strategy.exit_rules import DEFAULT_EXIT_PROFILE, DEFAULT_FAILURE_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT, DEFAULT_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT_VOLUME_STALL_RATIO
 from ashare_signal.strategy.tianzhu9_orders import Tianzhu9OrderPlan, generate_tianzhu9_order_plan
 from ashare_signal.strategy.tianzhu9_orders import plan_to_feishu_text, render_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
@@ -43,12 +45,12 @@ def run_tianzhu9_daily_workflow(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
-    exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
-    hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
-    failure_exit_days: int | None = 8,
-    failure_exit_min_peak_profit_pct: float = 0.03,
-    volume_stall_exit: bool = True,
-    volume_stall_ratio: float = 1.4,
+    exit_profile: str = DEFAULT_EXIT_PROFILE,
+    hard_exit_days: int | None = DEFAULT_HARD_EXIT_DAYS,
+    failure_exit_days: int | None = DEFAULT_FAILURE_EXIT_DAYS,
+    failure_exit_min_peak_profit_pct: float = DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    volume_stall_exit: bool = DEFAULT_VOLUME_STALL_EXIT,
+    volume_stall_ratio: float = DEFAULT_VOLUME_STALL_RATIO,
 ) -> Tianzhu9DailyResult:
     resolved_end_date = _parse_date(end_date) if end_date else _today(config.runtime.timezone)
     sync_result: SyncResult | None = None
@@ -263,12 +265,12 @@ def run_tianzhu9_scheduler(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
-    exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
-    hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
-    failure_exit_days: int | None = 8,
-    failure_exit_min_peak_profit_pct: float = 0.03,
-    volume_stall_exit: bool = True,
-    volume_stall_ratio: float = 1.4,
+    exit_profile: str = DEFAULT_EXIT_PROFILE,
+    hard_exit_days: int | None = DEFAULT_HARD_EXIT_DAYS,
+    failure_exit_days: int | None = DEFAULT_FAILURE_EXIT_DAYS,
+    failure_exit_min_peak_profit_pct: float = DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    volume_stall_exit: bool = DEFAULT_VOLUME_STALL_EXIT,
+    volume_stall_ratio: float = DEFAULT_VOLUME_STALL_RATIO,
 ) -> None:
     resolved_run_at = parse_run_time(run_at or config.runtime.daily_run_time)
     resolved_timezone = timezone or config.runtime.timezone

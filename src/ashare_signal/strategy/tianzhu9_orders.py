@@ -12,7 +12,10 @@ from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
-from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_EXIT_PROFILE, DEFAULT_FAILURE_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT, DEFAULT_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT_VOLUME_STALL_RATIO
+from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE
 from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, SlowProfitLockExit
 from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal, tiered_trailing_take_profit
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
@@ -57,16 +60,18 @@ def generate_tianzhu9_order_plan(
     top_n: int = 5,
     hold_days: int = 5,
     max_hold_days: int = 10,
-    exit_profile: str = SLOW_PROFIT_LOCK_PROFILE,
-    hard_exit_days: int | None = SLOW_PROFIT_LOCK_HARD_EXIT_DAYS,
-    failure_exit_days: int | None = 8,
-    failure_exit_min_peak_profit_pct: float = 0.03,
-    volume_stall_exit: bool = True,
-    volume_stall_ratio: float = 1.4,
+    exit_profile: str = DEFAULT_EXIT_PROFILE,
+    hard_exit_days: int | None = DEFAULT_HARD_EXIT_DAYS,
+    failure_exit_days: int | None = DEFAULT_FAILURE_EXIT_DAYS,
+    failure_exit_min_peak_profit_pct: float = DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    volume_stall_exit: bool = DEFAULT_VOLUME_STALL_EXIT,
+    volume_stall_ratio: float = DEFAULT_VOLUME_STALL_RATIO,
     min_avg_amount_yuan: float = 50_000_000.0,
 ) -> Tianzhu9OrderPlan:
     if exit_profile not in EXIT_PROFILES:
         raise ValueError(f"exit_profile must be one of: {', '.join(EXIT_PROFILES)}")
+    hard_exit_days = max(int(hard_exit_days), 1) if hard_exit_days is not None else None
+    failure_exit_days = max(int(failure_exit_days), 1) if failure_exit_days else None
 
     requested_date = to_compact_date(as_of or date.today())
     signal_trade_date = repository.resolve_trade_date(requested_date)
@@ -193,22 +198,20 @@ def generate_tianzhu9_order_plan(
             "风格收益和广度同步转弱时退出，"
             f"最长持仓 {hard_exit_days} 个交易日。"
         )
-    elif hard_exit_days is None:
-        notes.append(
-            "卖出规则：不使用硬止损/固定持有天数退出，"
-            "先执行盈利后分层追踪止盈，"
-            f"持仓满 {failure_exit_days} 个交易日且最高浮盈不足 {failure_exit_min_peak_profit_pct:.0%} "
-            "并转弱时失败退出，"
-            f"最高浮盈超过 5% 后出现 {volume_stall_ratio:.1f} 倍放量滞涨时退出。"
-        )
     else:
-        notes.append(
-            "卖出规则：不使用硬止损，先执行盈利后分层追踪止盈，"
-            f"持仓满 {failure_exit_days} 个交易日且最高浮盈不足 {failure_exit_min_peak_profit_pct:.0%} "
-            "并转弱时失败退出，"
-            f"最高浮盈超过 5% 后出现 {volume_stall_ratio:.1f} 倍放量滞涨时退出，"
-            f"未触发止盈则持仓满 {hard_exit_days} 个交易日硬卖出。"
-        )
+        rule_parts = ["卖出规则：不使用硬止损，先执行盈利后分层追踪止盈"]
+        if failure_exit_days is not None:
+            rule_parts.append(
+                f"持仓满 {failure_exit_days} 个交易日且最高浮盈不足 {failure_exit_min_peak_profit_pct:.0%} "
+                "并转弱时失败退出"
+            )
+        if volume_stall_exit:
+            rule_parts.append(f"最高浮盈超过 5% 后出现 {volume_stall_ratio:.1f} 倍放量滞涨时退出")
+        if hard_exit_days is None:
+            rule_parts.append("不使用固定持有天数硬退出")
+        else:
+            rule_parts.append(f"未触发止盈则持仓满 {hard_exit_days} 个交易日硬卖出")
+        notes.append("，".join(rule_parts) + "。")
 
     reports_dir = base_dir / config.paths.reports_dir / "tianzhu9-orders"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -317,17 +320,19 @@ def _build_position_orders(
     hold_days: int,
     max_hold_days: int,
     cached_dates: list[str] | None = None,
-    exit_profile: str = LEGACY_EXIT_PROFILE,
-    hard_exit_days: int | None = None,
-    failure_exit_days: int | None = 8,
-    failure_exit_min_peak_profit_pct: float = 0.03,
-    volume_stall_exit: bool = True,
-    volume_stall_ratio: float = 1.4,
+    exit_profile: str = DEFAULT_EXIT_PROFILE,
+    hard_exit_days: int | None = DEFAULT_HARD_EXIT_DAYS,
+    failure_exit_days: int | None = DEFAULT_FAILURE_EXIT_DAYS,
+    failure_exit_min_peak_profit_pct: float = DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    volume_stall_exit: bool = DEFAULT_VOLUME_STALL_EXIT,
+    volume_stall_ratio: float = DEFAULT_VOLUME_STALL_RATIO,
     risk_off: bool = False,
     eligible_groups: set[str] | None = None,
 ) -> tuple[list[Tianzhu9Order], list[Tianzhu9Order]]:
     if exit_profile not in EXIT_PROFILES:
         raise ValueError(f"exit_profile must be one of: {', '.join(EXIT_PROFILES)}")
+    hard_exit_days = max(int(hard_exit_days), 1) if hard_exit_days is not None else None
+    failure_exit_days = max(int(failure_exit_days), 1) if failure_exit_days else None
 
     sell_orders: list[Tianzhu9Order] = []
     hold_orders: list[Tianzhu9Order] = []

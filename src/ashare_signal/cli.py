@@ -15,7 +15,9 @@ from ashare_signal.portfolio.manager import PortfolioManager
 from ashare_signal.scheduler.daily import run_daily_workflow, run_scheduler
 from ashare_signal.scheduler.jobs import run_daily_signal_job
 from ashare_signal.scheduler.tianzhu9_daily import run_tianzhu9_daily_workflow, run_tianzhu9_scheduler
-from ashare_signal.strategy.exit_rules import EXIT_PROFILES, SLOW_PROFIT_LOCK_HARD_EXIT_DAYS, SLOW_PROFIT_LOCK_PROFILE
+from ashare_signal.strategy.exit_rules import DEFAULT_EXIT_PROFILE, DEFAULT_FAILURE_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT, DEFAULT_HARD_EXIT_DAYS
+from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT_VOLUME_STALL_RATIO, EXIT_PROFILES
 from ashare_signal.strategy.tianzhu9_orders import generate_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date
 
@@ -271,11 +273,15 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--style-min-breadth", type=float, default=0.48)
     full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
     full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
-    full_a_momentum.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
-    full_a_momentum.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
+    full_a_momentum.add_argument("--exit-profile", choices=EXIT_PROFILES, default=DEFAULT_EXIT_PROFILE)
+    full_a_momentum.add_argument("--hard-exit-days", type=int, default=DEFAULT_HARD_EXIT_DAYS)
     full_a_momentum.add_argument("--exit-ma20-break", action="store_true")
-    full_a_momentum.add_argument("--exit-failure-days", type=int, default=8)
-    full_a_momentum.add_argument("--exit-failure-min-peak-profit-pct", type=float, default=0.03)
+    full_a_momentum.add_argument("--exit-failure-days", type=int, default=DEFAULT_FAILURE_EXIT_DAYS)
+    full_a_momentum.add_argument(
+        "--exit-failure-min-peak-profit-pct",
+        type=float,
+        default=DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    )
     full_a_momentum.add_argument("--exit-adaptive-trailing", action="store_true")
     full_a_momentum.add_argument("--exit-atr-multiplier", type=float, default=1.5)
     full_a_momentum.add_argument("--exit-market-risk", action="store_true")
@@ -283,9 +289,9 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--exit-relative-weak", action="store_true")
     full_a_momentum.add_argument("--exit-relative-weak-5d-pct", type=float, default=0.04)
     full_a_momentum.add_argument("--exit-relative-weak-20d-pct", type=float, default=0.08)
-    full_a_momentum.add_argument("--exit-volume-stall", action="store_true", default=True)
+    full_a_momentum.add_argument("--exit-volume-stall", action="store_true", default=DEFAULT_VOLUME_STALL_EXIT)
     full_a_momentum.add_argument("--no-exit-volume-stall", dest="exit_volume_stall", action="store_false")
-    full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=1.4)
+    full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
     full_a_momentum.add_argument("--exit-upper-shadow", action="store_true")
     full_a_momentum.add_argument("--exit-upper-shadow-pct", type=float, default=0.45)
 
@@ -303,13 +309,17 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_orders.add_argument("--top-n", type=int, default=5)
     tianzhu9_orders.add_argument("--hold-days", type=int, default=5)
     tianzhu9_orders.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_orders.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
-    tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
-    tianzhu9_orders.add_argument("--failure-exit-days", type=int, default=8)
-    tianzhu9_orders.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
-    tianzhu9_orders.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_orders.add_argument("--exit-profile", choices=EXIT_PROFILES, default=DEFAULT_EXIT_PROFILE)
+    tianzhu9_orders.add_argument("--hard-exit-days", type=int, default=DEFAULT_HARD_EXIT_DAYS)
+    tianzhu9_orders.add_argument("--failure-exit-days", type=int, default=DEFAULT_FAILURE_EXIT_DAYS)
+    tianzhu9_orders.add_argument(
+        "--failure-exit-min-peak-profit-pct",
+        type=float,
+        default=DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    )
+    tianzhu9_orders.add_argument("--volume-stall-exit", action="store_true", default=DEFAULT_VOLUME_STALL_EXIT)
     tianzhu9_orders.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
-    tianzhu9_orders.add_argument("--volume-stall-ratio", type=float, default=1.4)
+    tianzhu9_orders.add_argument("--volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
 
     tianzhu9_daily = subparsers.add_parser(
         "run-tianzhu9-daily",
@@ -324,13 +334,17 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_daily.add_argument("--top-n", type=int, default=5)
     tianzhu9_daily.add_argument("--hold-days", type=int, default=5)
     tianzhu9_daily.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_daily.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
-    tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
-    tianzhu9_daily.add_argument("--failure-exit-days", type=int, default=8)
-    tianzhu9_daily.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
-    tianzhu9_daily.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_daily.add_argument("--exit-profile", choices=EXIT_PROFILES, default=DEFAULT_EXIT_PROFILE)
+    tianzhu9_daily.add_argument("--hard-exit-days", type=int, default=DEFAULT_HARD_EXIT_DAYS)
+    tianzhu9_daily.add_argument("--failure-exit-days", type=int, default=DEFAULT_FAILURE_EXIT_DAYS)
+    tianzhu9_daily.add_argument(
+        "--failure-exit-min-peak-profit-pct",
+        type=float,
+        default=DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    )
+    tianzhu9_daily.add_argument("--volume-stall-exit", action="store_true", default=DEFAULT_VOLUME_STALL_EXIT)
     tianzhu9_daily.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
-    tianzhu9_daily.add_argument("--volume-stall-ratio", type=float, default=1.4)
+    tianzhu9_daily.add_argument("--volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
 
     tianzhu9_scheduler = subparsers.add_parser(
         "run-tianzhu9-scheduler",
@@ -347,13 +361,17 @@ def _build_parser() -> argparse.ArgumentParser:
     tianzhu9_scheduler.add_argument("--top-n", type=int, default=5)
     tianzhu9_scheduler.add_argument("--hold-days", type=int, default=5)
     tianzhu9_scheduler.add_argument("--max-hold-days", type=int, default=10)
-    tianzhu9_scheduler.add_argument("--exit-profile", choices=EXIT_PROFILES, default=SLOW_PROFIT_LOCK_PROFILE)
-    tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=SLOW_PROFIT_LOCK_HARD_EXIT_DAYS)
-    tianzhu9_scheduler.add_argument("--failure-exit-days", type=int, default=8)
-    tianzhu9_scheduler.add_argument("--failure-exit-min-peak-profit-pct", type=float, default=0.03)
-    tianzhu9_scheduler.add_argument("--volume-stall-exit", action="store_true", default=True)
+    tianzhu9_scheduler.add_argument("--exit-profile", choices=EXIT_PROFILES, default=DEFAULT_EXIT_PROFILE)
+    tianzhu9_scheduler.add_argument("--hard-exit-days", type=int, default=DEFAULT_HARD_EXIT_DAYS)
+    tianzhu9_scheduler.add_argument("--failure-exit-days", type=int, default=DEFAULT_FAILURE_EXIT_DAYS)
+    tianzhu9_scheduler.add_argument(
+        "--failure-exit-min-peak-profit-pct",
+        type=float,
+        default=DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT,
+    )
+    tianzhu9_scheduler.add_argument("--volume-stall-exit", action="store_true", default=DEFAULT_VOLUME_STALL_EXIT)
     tianzhu9_scheduler.add_argument("--no-volume-stall-exit", dest="volume_stall_exit", action="store_false")
-    tianzhu9_scheduler.add_argument("--volume-stall-ratio", type=float, default=1.4)
+    tianzhu9_scheduler.add_argument("--volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
 
     run_daily = subparsers.add_parser(
         "run-daily",
