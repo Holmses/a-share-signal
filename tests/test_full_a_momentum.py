@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9Position, Tianzhu9Trade
@@ -102,6 +103,37 @@ def test_tianzhu9_trade_diagnostic_fields_keep_legacy_construction() -> None:
     assert trade.entry_recipe is None
     assert trade.exit_reason is None
     assert trade.holding_days is None
+
+
+def test_default_recipe_candidate_selection_uses_baseline_path(tmp_path, monkeypatch) -> None:
+    engine = FullAMomentumBacktestEngine(config=_config(), repository=SimpleNamespace(), base_dir=tmp_path)
+    expected = [{"ts_code": "000001.SZ"}]
+
+    def fake_select_candidates(**kwargs):
+        return expected
+
+    monkeypatch.setattr(engine, "_select_candidates", fake_select_candidates)
+
+    result = engine._select_candidates_from_recipes(
+        signal_frame=pd.DataFrame(),
+        style_state={},
+        eligible_groups=set(),
+        excluded_symbols=set(),
+        risk_off=True,
+        market_state="risk_off",
+    )
+
+    assert result is expected
+
+
+def test_rebound_bottoming_watch_cannot_be_used_for_production_buys(tmp_path) -> None:
+    with pytest.raises(ValueError, match="research-only"):
+        FullAMomentumBacktestEngine(
+            config=_config(),
+            repository=SimpleNamespace(),
+            base_dir=tmp_path,
+            enabled_recipes=["momentum_core", "rebound_bottoming_watch"],
+        )
 
 
 def test_exit_reason_prefers_trailing_take_profit(tmp_path) -> None:

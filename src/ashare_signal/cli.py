@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from ashare_signal.backtest.engine import BacktestEngine
+from ashare_signal.backtest.full_a_recipes import FullARecipeStudyEngine
 from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.ranking_event_study import RankingEventStudyEngine
 from ashare_signal.backtest.ranking_rotation import RankingRotationBacktestEngine
@@ -366,6 +367,25 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
     full_a_momentum.add_argument("--exit-upper-shadow", action="store_true")
     full_a_momentum.add_argument("--exit-upper-shadow-pct", type=float, default=0.45)
+    full_a_momentum.add_argument("--enabled-recipes", default="momentum_core")
+    full_a_momentum.add_argument("--overlay-recipes", default="")
+    full_a_momentum.add_argument("--quality-filter-enabled", action="store_true")
+    full_a_momentum.add_argument("--quality-filter-min-score", type=float, default=0.40)
+    full_a_momentum.add_argument("--quality-filter-score-bonus", type=float, default=0.02)
+    full_a_momentum.add_argument("--overlay-score-bonus", type=float, default=0.03)
+    full_a_momentum.add_argument("--overlay-max-daily-candidates", type=int, default=2)
+
+    full_a_recipes = subparsers.add_parser(
+        "study-full-a-recipes",
+        help="Compare Full A momentum recipe combinations with baseline admission checks",
+    )
+    full_a_recipes.add_argument("--config", default="configs/strategy.toml.example")
+    full_a_recipes.add_argument("--start-date", default=None)
+    full_a_recipes.add_argument("--end-date", default=None)
+    full_a_recipes.add_argument(
+        "--recipes",
+        default="momentum_core,trend_pullback_overlay,quality_momentum_filter,combo_v2",
+    )
 
     risk_off_standalone = subparsers.add_parser(
         "study-risk-off-standalone",
@@ -924,9 +944,36 @@ def main() -> int:
         print(f"summary_path={result.summary_path}")
         return 0
 
+    if args.command == "study-full-a-recipes":
+        try:
+            recipes = parse_csv_values(args.recipes, []) if args.recipes else None
+            result = FullARecipeStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                recipes=recipes,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Full A recipe comparison completed")
+        print(f"start_trade_date={result.start_trade_date}")
+        print(f"end_trade_date={result.end_trade_date}")
+        print(f"recipes={','.join(result.recipes)}")
+        print(f"comparison_csv_path={result.comparison_csv_path}")
+        print(f"comparison_json_path={result.comparison_json_path}")
+        print(f"markdown_path={result.markdown_path}")
+        return 0
+
     if args.command == "backtest-full-a-momentum":
         try:
             groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
+            enabled_recipes = parse_csv_values(args.enabled_recipes, ["momentum_core"])
+            overlay_recipes = parse_csv_values(args.overlay_recipes, [])
             if args.recipe:
                 recipe = full_a_momentum_recipe(config, recipe_id=args.recipe, name=args.recipe)
                 engine = FullAMomentumBacktestEngine.from_recipe(
@@ -934,6 +981,13 @@ def main() -> int:
                     repository=repository,
                     base_dir=base_dir,
                     recipe=recipe,
+                    enabled_recipes=enabled_recipes,
+                    overlay_recipes=overlay_recipes,
+                    quality_filter_enabled=args.quality_filter_enabled,
+                    quality_filter_min_score=args.quality_filter_min_score,
+                    quality_filter_score_bonus=args.quality_filter_score_bonus,
+                    overlay_score_bonus=args.overlay_score_bonus,
+                    overlay_max_daily_candidates=args.overlay_max_daily_candidates,
                 )
             else:
                 engine = FullAMomentumBacktestEngine(
@@ -968,6 +1022,13 @@ def main() -> int:
                     exit_upper_shadow=args.exit_upper_shadow,
                     exit_upper_shadow_pct=args.exit_upper_shadow_pct,
                     exit_profile=args.exit_profile,
+                    enabled_recipes=enabled_recipes,
+                    overlay_recipes=overlay_recipes,
+                    quality_filter_enabled=args.quality_filter_enabled,
+                    quality_filter_min_score=args.quality_filter_min_score,
+                    quality_filter_score_bonus=args.quality_filter_score_bonus,
+                    overlay_score_bonus=args.overlay_score_bonus,
+                    overlay_max_daily_candidates=args.overlay_max_daily_candidates,
                 )
             result = engine.run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,

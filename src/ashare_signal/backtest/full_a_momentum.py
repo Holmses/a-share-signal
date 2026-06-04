@@ -19,9 +19,19 @@ from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE
 from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, TIERED_TRAILING_TAKE_PROFIT_LEVELS
 from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
+from ashare_signal.strategy.filters import StrategyPreferenceFilter
 from ashare_signal.strategy.recipe import StrategyRecipe
 from ashare_signal.strategy.sell_reasons import normalize_sell_reason, sell_reason_counts, summarize_sell_reasons
 from ashare_signal.utils.dates import to_compact_date
+
+
+DEFAULT_FULL_A_ENABLED_RECIPES = ("momentum_core",)
+SUPPORTED_FULL_A_ENTRY_RECIPES = (
+    "momentum_core",
+    "trend_pullback_overlay",
+    "quality_momentum_filter",
+    "rebound_bottoming_watch",
+)
 
 
 class FullAMomentumBacktestEngine:
@@ -65,6 +75,13 @@ class FullAMomentumBacktestEngine:
         exit_upper_shadow: bool = False,
         exit_upper_shadow_pct: float = 0.45,
         exit_profile: str = DEFAULT_EXIT_PROFILE,
+        enabled_recipes: list[str] | None = None,
+        overlay_recipes: list[str] | None = None,
+        quality_filter_enabled: bool = False,
+        quality_filter_min_score: float = 0.40,
+        quality_filter_score_bonus: float = 0.02,
+        overlay_score_bonus: float = 0.03,
+        overlay_max_daily_candidates: int = 2,
         lot_size: int | None = None,
     ) -> None:
         self.config = config
@@ -102,6 +119,14 @@ class FullAMomentumBacktestEngine:
         self.exit_upper_shadow = bool(exit_upper_shadow)
         self.exit_upper_shadow_pct = float(exit_upper_shadow_pct)
         self.exit_strategy = self._exit_strategy_name()
+        self.enabled_recipes = _normalize_recipe_names(enabled_recipes, DEFAULT_FULL_A_ENABLED_RECIPES)
+        self.overlay_recipes = _normalize_recipe_names(overlay_recipes, ())
+        self._validate_candidate_recipes()
+        self.quality_filter_enabled = bool(quality_filter_enabled or "quality_momentum_filter" in self.enabled_recipes)
+        self.quality_filter_min_score = float(quality_filter_min_score)
+        self.quality_filter_score_bonus = float(quality_filter_score_bonus)
+        self.overlay_score_bonus = float(overlay_score_bonus)
+        self.overlay_max_daily_candidates = max(int(overlay_max_daily_candidates), 0)
         self.lot_size = int(lot_size or config.backtest.lot_size)
 
     @classmethod
@@ -112,6 +137,13 @@ class FullAMomentumBacktestEngine:
         repository: DataRepository,
         base_dir: Path,
         recipe: StrategyRecipe,
+        enabled_recipes: list[str] | None = None,
+        overlay_recipes: list[str] | None = None,
+        quality_filter_enabled: bool = False,
+        quality_filter_min_score: float = 0.40,
+        quality_filter_score_bonus: float = 0.02,
+        overlay_score_bonus: float = 0.03,
+        overlay_max_daily_candidates: int = 2,
     ) -> "FullAMomentumBacktestEngine":
         if recipe.family != "full_a_momentum":
             raise ValueError(f"recipe family must be 'full_a_momentum', got {recipe.family!r}")
@@ -154,8 +186,23 @@ class FullAMomentumBacktestEngine:
             exit_upper_shadow=recipe.exit.upper_shadow_exit,
             exit_upper_shadow_pct=recipe.exit.upper_shadow_pct,
             exit_profile=recipe.exit.profile,
+            enabled_recipes=enabled_recipes,
+            overlay_recipes=overlay_recipes,
+            quality_filter_enabled=quality_filter_enabled,
+            quality_filter_min_score=quality_filter_min_score,
+            quality_filter_score_bonus=quality_filter_score_bonus,
+            overlay_score_bonus=overlay_score_bonus,
+            overlay_max_daily_candidates=overlay_max_daily_candidates,
             lot_size=recipe.portfolio.lot_size,
         )
+
+    def _validate_candidate_recipes(self) -> None:
+        configured = set(self.enabled_recipes) | set(self.overlay_recipes)
+        unsupported = sorted(configured - set(SUPPORTED_FULL_A_ENTRY_RECIPES))
+        if unsupported:
+            raise ValueError(f"Unsupported Full A candidate recipe(s): {', '.join(unsupported)}")
+        if "rebound_bottoming_watch" in configured:
+            raise ValueError("rebound_bottoming_watch is research-only and cannot be used for production buys")
 
     def _exit_strategy_name(self) -> str:
         if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
@@ -208,6 +255,20 @@ class FullAMomentumBacktestEngine:
         if self.exit_upper_shadow:
             slug += f"-shadow{_slug_float(self.exit_upper_shadow_pct)}"
         return slug
+
+    def _candidate_recipe_slug(self) -> str:
+        if (
+            self.enabled_recipes == DEFAULT_FULL_A_ENABLED_RECIPES
+            and not self.overlay_recipes
+            and not self.quality_filter_enabled
+        ):
+            return ""
+        parts = ["recipes", "-".join(self.enabled_recipes)]
+        if self.overlay_recipes:
+            parts.append("overlay-" + "-".join(self.overlay_recipes))
+        if self.quality_filter_enabled:
+            parts.append("quality")
+        return "-" + "-".join(parts).replace("_", "-")
 
     def run(self, start_date: date | None = None, end_date: date | None = None) -> Tianzhu9BacktestResult:
         cached_dates = self.repository.complete_daily_cache_dates()
@@ -272,8 +333,9 @@ class FullAMomentumBacktestEngine:
             risk_off = bool(style_state["market_risk_off"])
             market_state = str(style_state["market_state"])
             eligible_groups = set(style_state["eligible_groups"])
-            selected = self._select_candidates(
+            selected = self._select_candidates_from_recipes(
                 signal_frame=signal_frame,
+                style_state=style_state,
                 eligible_groups=eligible_groups,
                 excluded_symbols={
                     symbol
@@ -366,7 +428,7 @@ class FullAMomentumBacktestEngine:
         ).replace("-", "m").replace(".", "p")
         stem = (
             f"full-a-momentum-{self.selection_variant}-top{self.top_n}-"
-            f"{groups_slug}-exit-{self._exit_slug()}-filter-"
+            f"{groups_slug}{self._candidate_recipe_slug()}-exit-{self._exit_slug()}-filter-"
             f"{filter_slug}-{resolved_start}-{resolved_end}"
         )
         summary_path = reports_dir / f"{stem}-summary.json"
@@ -423,6 +485,15 @@ class FullAMomentumBacktestEngine:
                 "upper_shadow_pct": self.exit_upper_shadow_pct,
             },
             "max_positions": self.max_positions,
+            "candidate_recipes": {
+                "enabled_recipes": list(self.enabled_recipes),
+                "overlay_recipes": list(self.overlay_recipes),
+                "quality_filter_enabled": self.quality_filter_enabled,
+                "quality_filter_min_score": self.quality_filter_min_score,
+                "quality_filter_score_bonus": self.quality_filter_score_bonus,
+                "overlay_score_bonus": self.overlay_score_bonus,
+                "overlay_max_daily_candidates": self.overlay_max_daily_candidates,
+            },
             "min_avg_amount_yuan": self.min_avg_amount_yuan,
             "market_filter": {
                 "market_min_breadth": self.market_min_breadth,
@@ -588,6 +659,191 @@ class FullAMomentumBacktestEngine:
         if market_breadth >= self.market_min_breadth + 0.15 and market_return_20d >= 0.03:
             return "aggressive"
         return "normal"
+
+    def _select_candidates_from_recipes(
+        self,
+        *,
+        signal_frame: pd.DataFrame,
+        style_state: dict,
+        eligible_groups: set[str],
+        excluded_symbols: set[str],
+        risk_off: bool,
+        market_state: str,
+    ) -> list[dict]:
+        if (
+            self.enabled_recipes == DEFAULT_FULL_A_ENABLED_RECIPES
+            and not self.overlay_recipes
+            and not self.quality_filter_enabled
+        ):
+            return self._select_candidates(
+                signal_frame=signal_frame,
+                eligible_groups=eligible_groups,
+                excluded_symbols=excluded_symbols,
+                risk_off=risk_off,
+                market_state=market_state,
+            )
+
+        rows: list[dict] = []
+        if "momentum_core" in self.enabled_recipes:
+            rows.extend(
+                self._select_candidates(
+                    signal_frame=signal_frame,
+                    eligible_groups=eligible_groups,
+                    excluded_symbols=excluded_symbols,
+                    risk_off=risk_off,
+                    market_state=market_state,
+                )
+            )
+        if "trend_pullback_overlay" in set(self.enabled_recipes) | set(self.overlay_recipes):
+            rows.extend(
+                self._select_trend_pullback_overlay(
+                    signal_frame=signal_frame,
+                    style_state=style_state,
+                    eligible_groups=eligible_groups,
+                    excluded_symbols=excluded_symbols,
+                    risk_off=risk_off,
+                    market_state=market_state,
+                )
+            )
+        if self.quality_filter_enabled:
+            rows = self._apply_quality_momentum_filter(rows, signal_frame)
+        return self._dedupe_candidate_rows(rows)
+
+    def _select_trend_pullback_overlay(
+        self,
+        *,
+        signal_frame: pd.DataFrame,
+        style_state: dict,
+        eligible_groups: set[str],
+        excluded_symbols: set[str],
+        risk_off: bool,
+        market_state: str,
+    ) -> list[dict]:
+        if (
+            signal_frame.empty
+            or risk_off
+            or not eligible_groups
+            or market_state not in {"normal", "aggressive"}
+            or self.overlay_max_daily_candidates <= 0
+        ):
+            return []
+        frame = self._candidate_source_frame(
+            signal_frame=signal_frame,
+            style_state=style_state,
+            eligible_groups=eligible_groups,
+            excluded_symbols=excluded_symbols,
+        )
+        if frame.empty:
+            return []
+        try:
+            frame = StrategyPreferenceFilter(self.config.selection).apply_trend_pullback(frame)
+        except AttributeError:
+            return []
+        frame = frame.loc[frame["passes_strategy_preference_filter"].fillna(False)].copy()
+        if frame.empty:
+            return []
+        frame["selection_score"] = frame["selection_score"].fillna(0.0) + self.overlay_score_bonus
+        selected = frame.sort_values(["selection_score", "avg_amount_20d_yuan"], ascending=[False, False]).head(
+            self.overlay_max_daily_candidates
+        )
+        rows = []
+        for row in selected.to_dict(orient="records"):
+            row["score"] = float(row["selection_score"])
+            row["base_score"] = float(row["selection_score"]) - self.overlay_score_bonus
+            row["recipe_bonus"] = self.overlay_score_bonus
+            row["entry_recipe"] = "trend_pullback_overlay"
+            row["entry_reason"] = "full_a_momentum:trend_pullback_overlay"
+            row["style_group"] = row.get("style_group") or row.get("group")
+            row["market_state"] = market_state
+            row["score_explain"] = f"trend_pullback_overlay +{self.overlay_score_bonus:g}"
+            rows.append(row)
+        return rows
+
+    def _candidate_source_frame(
+        self,
+        *,
+        signal_frame: pd.DataFrame,
+        style_state: dict,
+        eligible_groups: set[str],
+        excluded_symbols: set[str],
+    ) -> pd.DataFrame:
+        score_column = f"{self.selection_variant}_score"
+        style_column = "style_group" if "style_group" in signal_frame.columns else "group"
+        frame = signal_frame.loc[
+            signal_frame[style_column].isin(eligible_groups)
+            & (~signal_frame["ts_code"].isin(excluded_symbols))
+        ].copy()
+        if frame.empty:
+            return frame
+        study_engine = SelectionEventStudyEngine(
+            config=self.config,
+            repository=self.repository,
+            base_dir=self.base_dir,
+            top_n_per_group=max(self.top_n, self.max_positions),
+            min_avg_amount_yuan=self.min_avg_amount_yuan,
+            groups=self.groups,
+            variants=[self.selection_variant],
+            horizons=[1],
+        )
+        frame = frame.loc[study_engine._variant_mask(frame, self.selection_variant)].copy()
+        if frame.empty:
+            return frame
+        group_scores = style_state["group_scores"]
+        frame["selection_score"] = (
+            frame[score_column].fillna(0.0)
+            + frame[style_column].map(group_scores).fillna(0.0) * self.style_score_weight
+        )
+        return frame
+
+    def _apply_quality_momentum_filter(self, rows: list[dict], signal_frame: pd.DataFrame) -> list[dict]:
+        if not rows:
+            return []
+        quality_scores = self._quality_score_map(signal_frame)
+        filtered = []
+        for row in rows:
+            symbol = str(row["ts_code"])
+            quality_score = quality_scores.get(symbol, 0.5)
+            if quality_score < self.quality_filter_min_score:
+                continue
+            bonus = self.quality_filter_score_bonus * quality_score
+            row = dict(row)
+            row["quality_score"] = quality_score
+            row["quality_bonus"] = bonus
+            row["score"] = float(row.get("score") or 0.0) + bonus
+            row["selection_score"] = row["score"]
+            row["entry_reason"] = f"{row.get('entry_reason') or 'full_a_momentum'}+quality_momentum_filter"
+            row["score_explain"] = f"{row.get('score_explain') or 'base'}; quality +{bonus:g}"
+            filtered.append(row)
+        return filtered
+
+    def _quality_score_map(self, signal_frame: pd.DataFrame) -> dict[str, float]:
+        if signal_frame.empty:
+            return {}
+        if "financial_quality_score" in signal_frame.columns:
+            scores = pd.to_numeric(signal_frame["financial_quality_score"], errors="coerce").fillna(0.5)
+        elif f"{self.selection_variant}_score" in signal_frame.columns:
+            raw = pd.to_numeric(signal_frame[f"{self.selection_variant}_score"], errors="coerce")
+            scores = raw.rank(pct=True).fillna(0.5)
+        else:
+            scores = pd.Series(0.5, index=signal_frame.index)
+        return {str(symbol): float(score) for symbol, score in zip(signal_frame["ts_code"], scores)}
+
+    def _dedupe_candidate_rows(self, rows: list[dict]) -> list[dict]:
+        if not rows:
+            return []
+        frame = pd.DataFrame(rows)
+        frame["score"] = pd.to_numeric(frame["score"], errors="coerce").fillna(0.0)
+        if "avg_amount_20d_yuan" not in frame.columns:
+            frame["avg_amount_20d_yuan"] = 0.0
+        frame["avg_amount_20d_yuan"] = pd.to_numeric(frame["avg_amount_20d_yuan"], errors="coerce").fillna(0.0)
+        frame = frame.sort_values(["score", "avg_amount_20d_yuan"], ascending=[False, False])
+        frame = frame.drop_duplicates(subset=["ts_code"], keep="first").head(self.top_n)
+        result = []
+        for rank, row in enumerate(frame.to_dict(orient="records"), start=1):
+            row["rank"] = rank
+            row["score"] = float(row["score"])
+            result.append(row)
+        return result
 
     def _select_candidates(
         self,
@@ -1123,6 +1379,13 @@ def _mean_numeric(series: pd.Series | None) -> float | None:
 
 def _value_or_default(value, default):
     return default if value is None else value
+
+
+def _normalize_recipe_names(values: list[str] | tuple[str, ...] | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if values is None:
+        values = default
+    names = tuple(str(value).strip() for value in values if str(value).strip())
+    return names or default
 
 
 def _safe_float(value) -> float | None:
