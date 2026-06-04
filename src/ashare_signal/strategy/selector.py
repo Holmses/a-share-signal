@@ -7,6 +7,7 @@ import pandas as pd
 
 from ashare_signal.config import SelectionConfig
 from ashare_signal.domain.models import Candidate, Position
+from ashare_signal.strategy.gates import MarketGate
 
 
 @dataclass(slots=True)
@@ -518,18 +519,7 @@ class UniverseSignalSelector:
 
     def market_allows_buy(self, universe: pd.DataFrame, signal_type: str | None = None) -> bool:
         frame = _coerce_universe(universe)
-        pool = frame.loc[frame["is_candidate"]].copy()
-        if pool.empty:
-            return False
-        breadth = (
-            (pool["close_to_ma_20"] > 0)
-            & (pool["momentum_20d"] > 0)
-        ).mean()
-        if signal_type == "rebound_bottoming":
-            return float(breadth) >= self.selection_config.rebound_market_min_breadth
-        if signal_type == "trend_pullback":
-            return float(breadth) >= self.selection_config.market_min_breadth
-        return float(breadth) >= self.selection_config.market_min_breadth
+        return MarketGate(self.selection_config).allows_buy(frame, signal_type=signal_type)
 
     def should_rotate(
         self,

@@ -19,6 +19,8 @@ from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE
 from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, TIERED_TRAILING_TAKE_PROFIT_LEVELS
 from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal
 from ashare_signal.strategy.exit_rules import tiered_trailing_take_profit
+from ashare_signal.strategy.recipe import StrategyRecipe
+from ashare_signal.strategy.sell_reasons import normalize_sell_reason, sell_reason_counts, summarize_sell_reasons
 from ashare_signal.utils.dates import to_compact_date
 
 
@@ -101,6 +103,59 @@ class FullAMomentumBacktestEngine:
         self.exit_upper_shadow_pct = float(exit_upper_shadow_pct)
         self.exit_strategy = self._exit_strategy_name()
         self.lot_size = int(lot_size or config.backtest.lot_size)
+
+    @classmethod
+    def from_recipe(
+        cls,
+        *,
+        config: AppConfig,
+        repository: DataRepository,
+        base_dir: Path,
+        recipe: StrategyRecipe,
+    ) -> "FullAMomentumBacktestEngine":
+        if recipe.family != "full_a_momentum":
+            raise ValueError(f"recipe family must be 'full_a_momentum', got {recipe.family!r}")
+        return cls(
+            config=config,
+            repository=repository,
+            base_dir=base_dir,
+            top_n=recipe.entry.top_n,
+            hold_days=recipe.portfolio.min_holding_days,
+            max_hold_days=_value_or_default(
+                recipe.portfolio.max_holding_days,
+                recipe.portfolio.min_holding_days,
+            ),
+            max_positions=recipe.portfolio.max_positions,
+            groups=list(recipe.universe.groups),
+            selection_variant=recipe.alpha.variant,
+            min_avg_amount_yuan=recipe.universe.min_avg_amount_yuan,
+            market_min_breadth=_value_or_default(recipe.risk.market_min_breadth, 0.50),
+            market_min_return_20d=_value_or_default(recipe.risk.market_min_return_20d, 0.0),
+            style_min_breadth=_value_or_default(recipe.risk.style_min_breadth, 0.48),
+            style_min_return_20d=_value_or_default(recipe.risk.style_min_return_20d, -0.01),
+            style_score_weight=_value_or_default(recipe.risk.style_score_weight, 0.06),
+            loss_cooldown_days=recipe.risk.loss_cooldown_days,
+            stop_loss_pct=_value_or_default(recipe.exit.stop_loss_pct, 0.05),
+            take_profit_trigger_pct=_value_or_default(recipe.exit.take_profit_trigger_pct, 0.08),
+            trailing_stop_drawdown_pct=_value_or_default(recipe.exit.trailing_stop_drawdown_pct, 0.04),
+            hard_exit_days=recipe.exit.hard_exit_days,
+            exit_ma20_break=recipe.exit.ma20_break,
+            exit_failure_days=recipe.exit.failure_days,
+            exit_failure_min_peak_profit_pct=recipe.exit.failure_min_peak_profit_pct,
+            exit_adaptive_trailing=recipe.exit.adaptive_trailing,
+            exit_atr_multiplier=recipe.exit.atr_multiplier,
+            exit_market_risk=recipe.exit.market_risk_exit,
+            exit_industry_weak=recipe.exit.industry_weak_exit,
+            exit_relative_weak=recipe.exit.relative_weak_exit,
+            exit_relative_weak_5d_pct=recipe.exit.relative_weak_5d_pct,
+            exit_relative_weak_20d_pct=recipe.exit.relative_weak_20d_pct,
+            exit_volume_stall=recipe.exit.volume_stall_exit,
+            exit_volume_stall_ratio=recipe.exit.volume_stall_ratio,
+            exit_upper_shadow=recipe.exit.upper_shadow_exit,
+            exit_upper_shadow_pct=recipe.exit.upper_shadow_pct,
+            exit_profile=recipe.exit.profile,
+            lot_size=recipe.portfolio.lot_size,
+        )
 
     def _exit_strategy_name(self) -> str:
         if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
@@ -215,6 +270,7 @@ class FullAMomentumBacktestEngine:
             signal_frame = factor_frame.loc[factor_frame["trade_date"].astype(str) == signal_trade_date].copy()
             style_state = self._market_style_state(signal_frame)
             risk_off = bool(style_state["market_risk_off"])
+            market_state = str(style_state["market_state"])
             eligible_groups = set(style_state["eligible_groups"])
             selected = self._select_candidates(
                 signal_frame=signal_frame,
@@ -225,6 +281,7 @@ class FullAMomentumBacktestEngine:
                     if cooldown_until >= trade_index
                 },
                 risk_off=risk_off,
+                market_state=market_state,
             )
             selected_symbols = {row["ts_code"] for row in selected}
 
@@ -239,6 +296,7 @@ class FullAMomentumBacktestEngine:
                 selected_symbols=selected_symbols,
                 eligible_groups=eligible_groups,
                 risk_off=risk_off,
+                market_state=market_state,
                 trades=trades,
                 cash_ref=sell_cash_box,
                 loss_cooldown_until=loss_cooldown_until,
@@ -276,6 +334,7 @@ class FullAMomentumBacktestEngine:
                     "benchmark_close_to_ma20": style_state["benchmark_close_to_ma20"],
                     "eligible_groups": ",".join(sorted(eligible_groups)),
                     "risk_off": risk_off,
+                    "market_state": market_state,
                 }
             )
 
@@ -316,10 +375,10 @@ class FullAMomentumBacktestEngine:
 
         equity_frame.to_csv(equity_curve_path, index=False)
         trade_columns = list(Tianzhu9Trade.__dataclass_fields__.keys())
-        pd.DataFrame([asdict(trade) for trade in trades], columns=trade_columns).to_csv(
-            trade_log_path,
-            index=False,
-        )
+        trade_frame = pd.DataFrame([asdict(trade) for trade in trades], columns=trade_columns)
+        trade_frame.to_csv(trade_log_path, index=False)
+        sell_frame = trade_frame.loc[trade_frame["action"] == "SELL"].copy()
+        buy_frame = trade_frame.loc[trade_frame["action"] == "BUY"].copy()
         summary_payload = {
             "strategy": "full_a_momentum",
             "selection_variant": self.selection_variant,
@@ -383,6 +442,23 @@ class FullAMomentumBacktestEngine:
                 else 0,
             },
             "risk_off_days": int(equity_frame["risk_off"].sum()),
+            "sell_reason_counts": sell_reason_counts(sell_trades),
+            "sell_reason_summary": summarize_sell_reasons(sell_trades),
+            "entry_recipe_counts": _value_counts(buy_frame, "entry_recipe"),
+            "entry_recipe_summary": _summarize_trade_groups(trade_frame, "entry_recipe"),
+            "market_state_counts": _value_counts(equity_frame, "market_state"),
+            "market_state_summary": _summarize_trade_groups(trade_frame, "market_state"),
+            "average_holding_days": _mean_numeric(sell_frame.get("holding_days")),
+            "average_profit_holding_days": _mean_numeric(
+                sell_frame.loc[pd.to_numeric(sell_frame["pnl"], errors="coerce") > 0, "holding_days"]
+                if not sell_frame.empty
+                else None
+            ),
+            "average_loss_holding_days": _mean_numeric(
+                sell_frame.loc[pd.to_numeric(sell_frame["pnl"], errors="coerce") <= 0, "holding_days"]
+                if not sell_frame.empty
+                else None
+            ),
             "average_position_count": float(equity_frame["position_count"].mean()),
             "average_invested_ratio": float((1.0 - equity_frame["cash"] / equity_frame["equity"]).mean()),
             "initial_cash": initial_cash,
@@ -453,6 +529,7 @@ class FullAMomentumBacktestEngine:
                 "group_scores": {},
                 "market_source": "empty",
                 "benchmark_close_to_ma20": None,
+                "market_state": "risk_off",
             }
         market_breadth = float((signal_frame["close"] >= signal_frame["ma_20"]).mean())
         benchmark_return = signal_frame.get("benchmark_return_20d")
@@ -479,6 +556,12 @@ class FullAMomentumBacktestEngine:
             group_scores[str(group)] = style_score
             if breadth >= self.style_min_breadth and return_20d >= self.style_min_return_20d:
                 eligible_groups.append(str(group))
+        market_state = self._market_state_name(
+            market_breadth=market_breadth,
+            market_return_20d=market_return_20d,
+            eligible_group_count=len(eligible_groups),
+            risk_off=risk_off,
+        )
         return {
             "market_breadth": market_breadth,
             "market_return_20d": market_return_20d,
@@ -487,7 +570,24 @@ class FullAMomentumBacktestEngine:
             "group_scores": group_scores,
             "market_source": market_source,
             "benchmark_close_to_ma20": benchmark_close_to_ma20,
+            "market_state": market_state,
         }
+
+    def _market_state_name(
+        self,
+        *,
+        market_breadth: float,
+        market_return_20d: float,
+        eligible_group_count: int,
+        risk_off: bool,
+    ) -> str:
+        if risk_off:
+            return "risk_off"
+        if eligible_group_count < max(1, len(self.groups) // 2):
+            return "defensive"
+        if market_breadth >= self.market_min_breadth + 0.15 and market_return_20d >= 0.03:
+            return "aggressive"
+        return "normal"
 
     def _select_candidates(
         self,
@@ -495,6 +595,7 @@ class FullAMomentumBacktestEngine:
         eligible_groups: set[str],
         excluded_symbols: set[str],
         risk_off: bool,
+        market_state: str,
     ) -> list[dict]:
         if signal_frame.empty or risk_off or not eligible_groups:
             return []
@@ -530,6 +631,10 @@ class FullAMomentumBacktestEngine:
         for rank, row in enumerate(selected.to_dict(orient="records"), start=1):
             row["rank"] = rank
             row["score"] = float(row["selection_score"])
+            row["entry_recipe"] = "momentum_core"
+            row["entry_reason"] = f"full_a_momentum:{self.selection_variant}"
+            row["style_group"] = row.get("style_group") or row.get("group")
+            row["market_state"] = market_state
             rows.append(row)
         return rows
 
@@ -581,6 +686,10 @@ class FullAMomentumBacktestEngine:
                 fees = max(gross_amount * self.config.backtest.commission_rate, 5.0)
             net_amount = gross_amount + fees
             cash_ref["cash"] -= net_amount
+            entry_recipe = str(candidate.get("entry_recipe") or "momentum_core")
+            entry_reason = str(candidate.get("entry_reason") or f"full_a_momentum:{self.selection_variant}")
+            market_state = str(candidate.get("market_state") or "unknown")
+            style_group = str(candidate.get("style_group") or candidate.get("group") or "")
             positions[symbol] = Tianzhu9Position(
                 symbol=symbol,
                 name=str(candidate.get("name") or symbol),
@@ -594,6 +703,10 @@ class FullAMomentumBacktestEngine:
                 score=float(candidate["score"]),
                 rank=int(candidate["rank"]),
                 highest_high=fill_price,
+                entry_recipe=entry_recipe,
+                entry_reason=entry_reason,
+                market_state=market_state,
+                style_group=style_group or None,
             )
             trades.append(
                 Tianzhu9Trade(
@@ -610,6 +723,10 @@ class FullAMomentumBacktestEngine:
                     rank=int(candidate["rank"]),
                     score=float(candidate["score"]),
                     pnl=None,
+                    entry_recipe=entry_recipe,
+                    entry_reason=entry_reason,
+                    market_state=market_state,
+                    style_group=style_group or None,
                 )
             )
             traded_value += gross_amount
@@ -626,6 +743,7 @@ class FullAMomentumBacktestEngine:
         selected_symbols: set[str],
         eligible_groups: set[str],
         risk_off: bool,
+        market_state: str,
         trades: list[Tianzhu9Trade],
         cash_ref: dict[str, float],
         loss_cooldown_until: dict[str, int],
@@ -641,55 +759,15 @@ class FullAMomentumBacktestEngine:
                 continue
             prev_close = float(feature["close"])
             highest_price = max(position.highest_close, position.highest_high or 0.0)
-            if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
-                profile_exit = slow_profit_lock_exit_signal(
-                    entry_price=position.entry_price,
-                    current_close=prev_close,
-                    highest_price=highest_price,
-                    holding_days=holding_days,
-                    ma20=_safe_float(feature.get("ma_20")),
-                    ma60=_safe_float(feature.get("ma_60")),
-                    return_5d=_safe_float(feature.get("return_5d")),
-                    style_return_20d=_safe_float(feature.get("style_return_20d_median")),
-                    style_breadth_20d=_safe_float(feature.get("style_breadth_20d")),
-                    hard_exit_days=self.hard_exit_days,
-                )
-                should_exit = profile_exit.should_exit
-            else:
-                exit_check = tiered_trailing_take_profit(
-                    entry_price=position.entry_price,
-                    current_close=prev_close,
-                    highest_price=highest_price,
-                    levels=self._trailing_levels(feature),
-                )
-                should_exit = exit_check.should_exit
-                if not should_exit and self._should_exit_ma20_break(feature, holding_days):
-                    should_exit = True
-                if not should_exit and self._should_exit_failure(feature, position, highest_price, holding_days):
-                    should_exit = True
-                if not should_exit and self._should_exit_market_risk(
-                    feature=feature,
-                    holding_days=holding_days,
-                    eligible_groups=eligible_groups,
-                    risk_off=risk_off,
-                ):
-                    should_exit = True
-                if not should_exit and self._should_exit_industry_weak(feature, holding_days):
-                    should_exit = True
-                if not should_exit and self._should_exit_relative_weak(feature, holding_days):
-                    should_exit = True
-                if not should_exit and self._should_exit_volume_stall(feature, position, highest_price, holding_days):
-                    should_exit = True
-                if not should_exit and self._should_exit_upper_shadow(feature, position, highest_price, holding_days):
-                    should_exit = True
-                if (
-                    not should_exit
-                    and self.exit_profile == LEGACY_EXIT_PROFILE
-                    and self.hard_exit_days is not None
-                    and holding_days >= self.hard_exit_days
-                ):
-                    should_exit = True
-            if not should_exit:
+            exit_reason = self._exit_reason(
+                feature=feature,
+                position=position,
+                highest_price=highest_price,
+                holding_days=holding_days,
+                eligible_groups=eligible_groups,
+                risk_off=risk_off,
+            )
+            if exit_reason is None:
                 continue
 
             row = prices.loc[symbol]
@@ -711,6 +789,7 @@ class FullAMomentumBacktestEngine:
             pnl = net_amount - position.entry_cost
             if pnl <= 0 and self.loss_cooldown_days > 0:
                 loss_cooldown_until[symbol] = trade_index + self.loss_cooldown_days
+            style_group = position.style_group or str(feature.get("style_group") or feature.get("group") or "")
             trades.append(
                 Tianzhu9Trade(
                     trade_date=trade_date,
@@ -726,11 +805,77 @@ class FullAMomentumBacktestEngine:
                     rank=position.rank,
                     score=position.score,
                     pnl=pnl,
+                    reason=exit_reason,
+                    entry_recipe=position.entry_recipe,
+                    entry_reason=position.entry_reason,
+                    exit_reason=exit_reason,
+                    market_state=market_state,
+                    style_group=style_group or None,
+                    holding_days=holding_days,
                 )
             )
             traded_value += gross_amount
             del positions[symbol]
         return traded_value
+
+    def _exit_reason(
+        self,
+        *,
+        feature: pd.Series,
+        position: Tianzhu9Position,
+        highest_price: float,
+        holding_days: int,
+        eligible_groups: set[str],
+        risk_off: bool,
+    ) -> str | None:
+        current_close = float(feature["close"])
+        if self.exit_profile == SLOW_PROFIT_LOCK_PROFILE:
+            profile_exit = slow_profit_lock_exit_signal(
+                entry_price=position.entry_price,
+                current_close=current_close,
+                highest_price=highest_price,
+                holding_days=holding_days,
+                ma20=_safe_float(feature.get("ma_20")),
+                ma60=_safe_float(feature.get("ma_60")),
+                return_5d=_safe_float(feature.get("return_5d")),
+                style_return_20d=_safe_float(feature.get("style_return_20d_median")),
+                style_breadth_20d=_safe_float(feature.get("style_breadth_20d")),
+                hard_exit_days=self.hard_exit_days,
+            )
+            if profile_exit.should_exit:
+                return normalize_sell_reason(profile_exit.reason)
+            return None
+
+        exit_check = tiered_trailing_take_profit(
+            entry_price=position.entry_price,
+            current_close=current_close,
+            highest_price=highest_price,
+            levels=self._trailing_levels(feature),
+        )
+        if exit_check.should_exit:
+            return "trailing_take_profit"
+        if self._should_exit_ma20_break(feature, holding_days):
+            return "ma20_break"
+        if self._should_exit_failure(feature, position, highest_price, holding_days):
+            return "failure_exit"
+        if self._should_exit_market_risk(
+            feature=feature,
+            holding_days=holding_days,
+            eligible_groups=eligible_groups,
+            risk_off=risk_off,
+        ):
+            return "market_risk_exit"
+        if self._should_exit_industry_weak(feature, holding_days):
+            return "industry_weak_exit"
+        if self._should_exit_relative_weak(feature, holding_days):
+            return "relative_weak_exit"
+        if self._should_exit_volume_stall(feature, position, highest_price, holding_days):
+            return "volume_stall_exit"
+        if self._should_exit_upper_shadow(feature, position, highest_price, holding_days):
+            return "upper_shadow_exit"
+        if self.exit_profile == LEGACY_EXIT_PROFILE and self.hard_exit_days is not None and holding_days >= self.hard_exit_days:
+            return "max_holding_days_exit"
+        return None
 
     def _trailing_levels(self, feature: pd.Series) -> tuple[tuple[float, float], ...]:
         if not self.exit_adaptive_trailing:
@@ -925,6 +1070,59 @@ class FullAMomentumBacktestEngine:
         if rows.empty:
             return None
         return rows.iloc[0]
+
+
+def _summarize_trade_groups(frame: pd.DataFrame, group_column: str) -> list[dict]:
+    if frame.empty or group_column not in frame.columns:
+        return []
+    work = frame.copy()
+    work[group_column] = work[group_column].fillna("").astype(str)
+    work.loc[work[group_column].str.strip() == "", group_column] = "unknown"
+    rows = []
+    for group, group_frame in work.groupby(group_column):
+        sell_frame = group_frame.loc[group_frame["action"] == "SELL"].copy()
+        pnl = pd.to_numeric(sell_frame.get("pnl"), errors="coerce")
+        holding_days = pd.to_numeric(sell_frame.get("holding_days"), errors="coerce")
+        score = pd.to_numeric(group_frame.get("score"), errors="coerce")
+        rank = pd.to_numeric(group_frame.get("rank"), errors="coerce")
+        sell_count = int(len(sell_frame))
+        win_count = int((pnl > 0).sum())
+        rows.append(
+            {
+                "group": group,
+                "trade_count": int(len(group_frame)),
+                "sell_trade_count": sell_count,
+                "win_rate": float(win_count / sell_count) if sell_count else 0.0,
+                "total_pnl": float(pnl.sum()) if pnl.notna().any() else 0.0,
+                "avg_pnl": float(pnl.mean()) if pnl.notna().any() else None,
+                "median_pnl": float(pnl.median()) if pnl.notna().any() else None,
+                "avg_holding_days": float(holding_days.mean()) if holding_days.notna().any() else None,
+                "avg_score": float(score.mean()) if score.notna().any() else None,
+                "avg_rank": float(rank.mean()) if rank.notna().any() else None,
+            }
+        )
+    return sorted(rows, key=lambda row: (-int(row["trade_count"]), str(row["group"])))
+
+
+def _value_counts(frame: pd.DataFrame, column: str) -> dict[str, int]:
+    if frame.empty or column not in frame.columns:
+        return {}
+    series = frame[column].fillna("").astype(str).str.strip()
+    series = series.loc[series != ""]
+    return {str(key): int(value) for key, value in series.value_counts(dropna=False).sort_index().items()}
+
+
+def _mean_numeric(series: pd.Series | None) -> float | None:
+    if series is None:
+        return None
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.mean())
+
+
+def _value_or_default(value, default):
+    return default if value is None else value
 
 
 def _safe_float(value) -> float | None:

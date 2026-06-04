@@ -112,6 +112,30 @@ rebound_big_profit_trigger_pct = 0.25
 rebound_big_profit_drawdown_pct = 0.10
 rebound_profit_exit_min_pct = 0.15
 
+[[recipes]]
+name = "trend_pullback_rank"
+enabled = true
+max_positions = 3
+min_score = 0.60
+market_gate = "risk_on"
+factor_set = ["momentum", "trend", "pullback", "liquidity", "volatility"]
+sell_rules = ["rotation_rank_drop", "trailing_take_profit", "trend_break"]
+max_daily_buys = 1
+max_daily_sells = 1
+notes = ["Existing trend pullback selector leg expressed as a recipe; not yet wired into production execution."]
+
+[[recipes]]
+name = "rebound_bottoming_rank"
+enabled = true
+max_positions = 2
+min_score = 0.60
+market_gate = "risk_neutral_or_rebound"
+factor_set = ["drawdown", "stabilization", "moneyflow", "industry_rebound"]
+sell_rules = ["fast_failure_exit", "profit_lock", "signal_low_break"]
+max_daily_buys = 1
+max_daily_sells = 1
+notes = ["Existing bottoming rebound selector leg expressed as a recipe; not yet wired into production execution."]
+
 [paths]
 raw_data_dir = "data/raw"
 processed_data_dir = "data/processed"

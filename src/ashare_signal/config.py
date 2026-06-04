@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
@@ -129,6 +130,20 @@ class SelectionConfig:
 
 
 @dataclass(slots=True)
+class RecipeConfig:
+    name: str
+    enabled: bool = True
+    max_positions: int | None = None
+    min_score: float | None = None
+    market_gate: str = "risk_on"
+    factor_set: tuple[str, ...] = ()
+    sell_rules: tuple[str, ...] = ()
+    max_daily_buys: int | None = None
+    max_daily_sells: int | None = None
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     paper_start_date: str | None = None
     daily_run_time: str = "18:30"
@@ -155,7 +170,8 @@ class AppConfig:
     selection: SelectionConfig
     runtime: RuntimeConfig
     paths: PathConfig
-    tushare_token: str | None
+    tushare_token: str | None = None
+    recipes: tuple[RecipeConfig, ...] = ()
 
     @property
     def max_positions(self) -> int:
@@ -198,6 +214,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     backtest = data.get("backtest", {})
     selection = data.get("selection", {})
     runtime = data.get("runtime", {})
+    recipes = _load_recipe_configs(data.get("recipes", []))
 
     return AppConfig(
         market=MarketConfig(**market),
@@ -214,4 +231,30 @@ def load_config(config_path: str | Path) -> AppConfig:
             logs_dir=Path(paths["logs_dir"]),
         ),
         tushare_token=os.getenv("TUSHARE_TOKEN"),
+        recipes=recipes,
     )
+
+
+def _load_recipe_configs(raw_recipes: list[dict] | tuple[dict, ...]) -> tuple[RecipeConfig, ...]:
+    if not isinstance(raw_recipes, list | tuple):
+        raise ValueError("Config section recipes must be a TOML array of tables")
+    recipes: list[RecipeConfig] = []
+    for raw_recipe in raw_recipes:
+        if not isinstance(raw_recipe, dict):
+            raise ValueError("Each recipe config must be a table")
+        recipe = dict(raw_recipe)
+        recipe["factor_set"] = _tuple_config_values(recipe.get("factor_set", ()))
+        recipe["sell_rules"] = _tuple_config_values(recipe.get("sell_rules", ()))
+        recipe["notes"] = _tuple_config_values(recipe.get("notes", ()))
+        recipes.append(RecipeConfig(**recipe))
+    return tuple(recipes)
+
+
+def _tuple_config_values(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    raise ValueError("Recipe list fields must be strings or arrays of strings")

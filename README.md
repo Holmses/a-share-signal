@@ -88,7 +88,60 @@ ashare-signal backtest \
   --end-date 2026-04-07
 ```
 
-7. 同步模拟仓位并生成下一交易日信号
+7. 生成研究用横截面排名快照
+
+```bash
+ashare-signal study-ranking \
+  --config configs/strategy.toml.example \
+  --as-of 2026-04-07 \
+  --variant quality_momentum_rank
+```
+
+这个命令只输出研究文件，不影响 `generate-signal`、模拟持仓或定时任务。
+
+8. 运行排名事件研究
+
+```bash
+ashare-signal study-ranking-events \
+  --config configs/strategy.toml.example \
+  --start-date 2026-03-02 \
+  --end-date 2026-05-28 \
+  --variant quality_momentum_rank \
+  --top-ks 5,10,20 \
+  --horizons 1,3,5,10
+```
+
+这个命令用于验证 TopK、分层收益、RankIC 和排名衰减，产物输出到 `reports/generated/ranking-events/`。
+
+9. 运行 TopK/DropN 排名轮动回测
+
+```bash
+ashare-signal backtest-ranking-rotation \
+  --config configs/strategy.toml.example \
+  --start-date 2024-05-29 \
+  --end-date 2026-05-28 \
+  --variant quality_momentum_rank \
+  --top-k 5 \
+  --candidate-buffer-k 20 \
+  --drop-n 1
+```
+
+这个命令用于 Phase BQ-3 试运行，按 T 日排名、T+1 开盘限价近似执行，每天最多替换 1 只。
+
+10. 运行多 recipe 对照实验
+
+```bash
+ashare-signal study-recipe-comparison \
+  --config configs/strategy.toml.example \
+  --start-date 2026-03-02 \
+  --end-date 2026-05-28 \
+  --top-n-per-recipe 5 \
+  --horizons 1,3,5,10
+```
+
+这个命令用于 Phase JQ-3 研究，比较配置化 recipe、组合 recipe 和质量动量排名的统一事件表现，并输出等权日篮子组合曲线，产物输出到 `reports/generated/recipe-comparison/`。
+
+11. 同步模拟仓位并生成下一交易日信号
 
 ```bash
 ashare-signal paper-trade \
@@ -97,13 +150,13 @@ ashare-signal paper-trade \
   --end-date 2026-04-07
 ```
 
-8. 构建 Docker 镜像
+12. 构建 Docker 镜像
 
 ```bash
 docker build -t ashare-signal .
 ```
 
-9. 用 Docker 运行
+13. 用 Docker 运行
 
 ```bash
 docker run --rm -it \
@@ -116,7 +169,7 @@ docker run --rm -it \
   --end-date 2026-04-07
 ```
 
-10. 一次性执行每日完整流程
+14. 一次性执行每日完整流程
 
 ```bash
 ashare-signal run-daily \
@@ -125,7 +178,7 @@ ashare-signal run-daily \
 
 这个命令会同步 Tushare、构建最新 universe、按 `[backtest].initial_cash` 重算模拟仓位，并生成下一交易日信号。
 
-11. 用 Docker Compose 启动每日定时容器
+15. 用 Docker Compose 启动每日定时容器
 
 ```bash
 docker compose up -d --build ashare-signal-daily
@@ -143,6 +196,16 @@ docker compose up -d --build ashare-signal-daily
   - 从本地 universe 快照和当前持仓 CSV 生成一份真实 Markdown 信号板
 - `ashare-signal backtest`
   - 基于缓存日线和当前选股规则运行真实日频 T+1 回测
+- `ashare-signal study-ranking`
+  - 从本地缓存构建研究用横截面排名快照，输出排名 CSV、TopN Markdown 和因子映射表
+- `ashare-signal study-ranking-events`
+  - 验证排名 TopK 的未来收益、分层收益、RankIC、risk-on/off 拆分和排名衰减
+- `ashare-signal backtest-ranking-rotation`
+  - 基于排名执行 TopK/DropN 研究回测，输出 equity、trades 和 summary，不影响生产信号
+- `ashare-signal study-recipe-comparison`
+  - 对配置化 recipe、组合 recipe 和质量动量排名做统一事件对照，输出 summary、events、daily、exposure 和 portfolio
+- `ashare-signal study-risk-off-standalone`
+  - 独立研究 `risk_off` 期间的防御/弹性候选机会，只输出研究报告，不影响主策略、日报或模拟持仓
 - `ashare-signal paper-trade`
   - 基于同一套回测逻辑同步模拟仓位、持仓快照、最新盈亏和下一交易日信号
 - `ashare-signal run-daily`

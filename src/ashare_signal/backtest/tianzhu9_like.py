@@ -27,6 +27,10 @@ class Tianzhu9Position:
     score: float
     rank: int
     highest_high: float | None = None
+    entry_recipe: str | None = None
+    entry_reason: str | None = None
+    market_state: str | None = None
+    style_group: str | None = None
 
 
 @dataclass(slots=True)
@@ -44,6 +48,13 @@ class Tianzhu9Trade:
     rank: int
     score: float
     pnl: float | None = None
+    reason: str | None = None
+    entry_recipe: str | None = None
+    entry_reason: str | None = None
+    exit_reason: str | None = None
+    market_state: str | None = None
+    style_group: str | None = None
+    holding_days: int | None = None
 
 
 @dataclass(slots=True)

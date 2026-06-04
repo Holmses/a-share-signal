@@ -6,6 +6,11 @@ from pathlib import Path
 
 from ashare_signal.backtest.engine import BacktestEngine
 from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
+from ashare_signal.backtest.ranking_event_study import RankingEventStudyEngine
+from ashare_signal.backtest.ranking_rotation import RankingRotationBacktestEngine
+from ashare_signal.backtest.ranking_study import RankingStudyEngine
+from ashare_signal.backtest.recipe_comparison import RecipeComparisonStudyEngine
+from ashare_signal.backtest.risk_off_standalone import RiskOffStandaloneStudyEngine
 from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.backtest.selection_event_study import parse_csv_values, parse_horizons
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9LikeBacktestEngine
@@ -18,6 +23,7 @@ from ashare_signal.scheduler.tianzhu9_daily import run_tianzhu9_daily_workflow, 
 from ashare_signal.strategy.exit_rules import DEFAULT_EXIT_PROFILE, DEFAULT_FAILURE_EXIT_DAYS
 from ashare_signal.strategy.exit_rules import DEFAULT_FAILURE_EXIT_MIN_PEAK_PROFIT_PCT, DEFAULT_HARD_EXIT_DAYS
 from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT_VOLUME_STALL_RATIO, EXIT_PROFILES
+from ashare_signal.strategy.recipe import full_a_momentum_recipe
 from ashare_signal.strategy.tianzhu9_orders import generate_tianzhu9_order_plan
 from ashare_signal.utils.dates import parse_compact_date
 
@@ -254,6 +260,67 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Minimum 20-day average turnover in yuan",
     )
 
+    ranking_study = subparsers.add_parser(
+        "study-ranking",
+        help="Generate a research-only cross-sectional ranking snapshot",
+    )
+    ranking_study.add_argument("--config", default="configs/strategy.toml.example")
+    ranking_study.add_argument("--as-of", default=None, help="Signal date in ISO format, defaults to today")
+    ranking_study.add_argument("--variant", default=RankingStudyEngine.DEFAULT_VARIANT)
+    ranking_study.add_argument("--top-n", type=int, default=20)
+
+    ranking_events = subparsers.add_parser(
+        "study-ranking-events",
+        help="Evaluate TopK ranking quality by future returns, RankIC, quantiles, and rank decay",
+    )
+    ranking_events.add_argument("--config", default="configs/strategy.toml.example")
+    ranking_events.add_argument("--start-date", default=None)
+    ranking_events.add_argument("--end-date", default=None)
+    ranking_events.add_argument("--variant", default=RankingEventStudyEngine.DEFAULT_VARIANT)
+    ranking_events.add_argument("--groups", default="main,chinext,star")
+    ranking_events.add_argument("--top-ks", default="5,10,20")
+    ranking_events.add_argument("--horizons", default="1,3,5,10")
+    ranking_events.add_argument("--quantile-buckets", type=int, default=RankingEventStudyEngine.DEFAULT_QUANTILES)
+    ranking_events.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+    ranking_events.add_argument("--market-min-breadth", type=float, default=0.50)
+    ranking_events.add_argument("--market-min-return-20d", type=float, default=0.0)
+
+    recipe_comparison = subparsers.add_parser(
+        "study-recipe-comparison",
+        help="Compare configured strategy recipes on one research event-study surface",
+    )
+    recipe_comparison.add_argument("--config", default="configs/strategy.toml.example")
+    recipe_comparison.add_argument("--start-date", default=None)
+    recipe_comparison.add_argument("--end-date", default=None)
+    recipe_comparison.add_argument("--recipes", default=None)
+    recipe_comparison.add_argument("--groups", default="main,chinext,star")
+    recipe_comparison.add_argument("--top-n-per-recipe", type=int, default=5)
+    recipe_comparison.add_argument("--horizons", default="1,3,5,10")
+    recipe_comparison.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+
+    ranking_rotation = subparsers.add_parser(
+        "backtest-ranking-rotation",
+        help="Run the research-only TopK/DropN ranking rotation backtest",
+    )
+    ranking_rotation.add_argument("--config", default="configs/strategy.toml.example")
+    ranking_rotation.add_argument("--start-date", default=None)
+    ranking_rotation.add_argument("--end-date", default=None)
+    ranking_rotation.add_argument("--variant", default=RankingRotationBacktestEngine.DEFAULT_VARIANT)
+    ranking_rotation.add_argument("--groups", default="main,chinext,star")
+    ranking_rotation.add_argument("--top-k", type=int, default=5)
+    ranking_rotation.add_argument("--candidate-buffer-k", type=int, default=20)
+    ranking_rotation.add_argument("--drop-n", type=int, default=1)
+    ranking_rotation.add_argument("--max-positions", type=int, default=None)
+    ranking_rotation.add_argument("--min-score-edge", type=float, default=0.02)
+    ranking_rotation.add_argument("--min-holding-days", type=int, default=3)
+    ranking_rotation.add_argument("--rotation-min-holding-days", type=int, default=5)
+    ranking_rotation.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+    ranking_rotation.add_argument("--market-min-breadth", type=float, default=0.50)
+    ranking_rotation.add_argument("--market-min-return-20d", type=float, default=0.0)
+    ranking_rotation.add_argument("--risk-off-exit", action="store_true")
+    ranking_rotation.add_argument("--allow-risk-off-buys", dest="risk_off_cash_guard", action="store_false")
+    ranking_rotation.set_defaults(risk_off_cash_guard=True)
+
     full_a_momentum = subparsers.add_parser(
         "backtest-full-a-momentum",
         help="Run full A-share momentum backtest with market/style filters",
@@ -261,6 +328,11 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--config", default="configs/strategy.toml.example")
     full_a_momentum.add_argument("--start-date", default=None)
     full_a_momentum.add_argument("--end-date", default=None)
+    full_a_momentum.add_argument(
+        "--recipe",
+        default=None,
+        help="Run an internal Full A momentum recipe instead of the legacy CLI parameter path",
+    )
     full_a_momentum.add_argument("--top-n", type=int, default=5)
     full_a_momentum.add_argument("--hold-days", type=int, default=5)
     full_a_momentum.add_argument("--max-hold-days", type=int, default=10)
@@ -294,6 +366,27 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
     full_a_momentum.add_argument("--exit-upper-shadow", action="store_true")
     full_a_momentum.add_argument("--exit-upper-shadow-pct", type=float, default=0.45)
+
+    risk_off_standalone = subparsers.add_parser(
+        "study-risk-off-standalone",
+        help="Run a research-only standalone risk-off opportunity study",
+    )
+    risk_off_standalone.add_argument("--config", default="configs/strategy.toml.example")
+    risk_off_standalone.add_argument("--start-date", default=None)
+    risk_off_standalone.add_argument("--end-date", default=None)
+    risk_off_standalone.add_argument("--top-n", type=int, default=5)
+    risk_off_standalone.add_argument("--groups", default="main,chinext,star")
+    risk_off_standalone.add_argument("--horizons", default="5,10,20")
+    risk_off_standalone.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+    risk_off_standalone.add_argument("--defensive-min-avg-amount-yuan", type=float, default=80000000.0)
+    risk_off_standalone.add_argument("--market-min-breadth", type=float, default=0.50)
+    risk_off_standalone.add_argument("--market-min-return-20d", type=float, default=0.0)
+    risk_off_standalone.add_argument(
+        "--check-external",
+        action="store_true",
+        help="Check observation-only external sources such as JunQuant's public risk score API.",
+    )
+    risk_off_standalone.add_argument("--external-timeout-seconds", type=float, default=10.0)
 
     tianzhu9_orders = subparsers.add_parser(
         "generate-tianzhu9-orders",
@@ -672,42 +765,211 @@ def main() -> int:
         print(f"summary_path={result.summary_path}")
         return 0
 
-    if args.command == "backtest-full-a-momentum":
+    if args.command == "study-ranking":
         try:
-            groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
-            result = FullAMomentumBacktestEngine(
+            result = RankingStudyEngine(
                 config=config,
                 repository=repository,
                 base_dir=base_dir,
+                variant=args.variant,
                 top_n=args.top_n,
-                hold_days=args.hold_days,
-                max_hold_days=args.max_hold_days,
-                max_positions=args.max_positions,
+            ).run(as_of=_parse_date(args.as_of))
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Ranking study completed")
+        print(f"trade_date={result.trade_date}")
+        print(f"variant={result.variant}")
+        print(f"total_symbols={result.total_symbols}")
+        print(f"tradeable_symbols={result.tradeable_symbols}")
+        print(f"top_n={result.top_n}")
+        print(f"ranking_path={result.ranking_path}")
+        print(f"markdown_path={result.markdown_path}")
+        print(f"factor_map_path={result.factor_map_path}")
+        return 0
+
+    if args.command == "study-ranking-events":
+        try:
+            groups = parse_csv_values(args.groups, RankingEventStudyEngine.DEFAULT_GROUPS)
+            top_ks = parse_horizons(args.top_ks, RankingEventStudyEngine.DEFAULT_TOP_KS)
+            horizons = parse_horizons(args.horizons, RankingEventStudyEngine.DEFAULT_HORIZONS)
+            result = RankingEventStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                variant=args.variant,
                 groups=groups,
-                selection_variant=args.selection_variant,
+                top_ks=top_ks,
+                horizons=horizons,
+                quantiles=args.quantile_buckets,
                 min_avg_amount_yuan=args.min_avg_amount_yuan,
                 market_min_breadth=args.market_min_breadth,
                 market_min_return_20d=args.market_min_return_20d,
-                style_min_breadth=args.style_min_breadth,
-                style_min_return_20d=args.style_min_return_20d,
-                style_score_weight=args.style_score_weight,
-                hard_exit_days=args.hard_exit_days,
-                exit_ma20_break=args.exit_ma20_break,
-                exit_failure_days=args.exit_failure_days,
-                exit_failure_min_peak_profit_pct=args.exit_failure_min_peak_profit_pct,
-                exit_adaptive_trailing=args.exit_adaptive_trailing,
-                exit_atr_multiplier=args.exit_atr_multiplier,
-                exit_market_risk=args.exit_market_risk,
-                exit_industry_weak=args.exit_industry_weak,
-                exit_relative_weak=args.exit_relative_weak,
-                exit_relative_weak_5d_pct=args.exit_relative_weak_5d_pct,
-                exit_relative_weak_20d_pct=args.exit_relative_weak_20d_pct,
-                exit_volume_stall=args.exit_volume_stall,
-                exit_volume_stall_ratio=args.exit_volume_stall_ratio,
-                exit_upper_shadow=args.exit_upper_shadow,
-                exit_upper_shadow_pct=args.exit_upper_shadow_pct,
-                exit_profile=args.exit_profile,
             ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Ranking event study completed")
+        print(f"start_entry_date={result.start_entry_date}")
+        print(f"end_entry_date={result.end_entry_date}")
+        print(f"start_signal_date={result.start_signal_date}")
+        print(f"end_signal_date={result.end_signal_date}")
+        print(f"variant={result.variant}")
+        print(f"top_ks={','.join(str(value) for value in result.top_ks)}")
+        print(f"horizons={','.join(str(value) for value in result.horizons)}")
+        print(f"event_count={result.event_count}")
+        print(f"events_path={result.events_path}")
+        print(f"quantiles_path={result.quantiles_path}")
+        print(f"daily_path={result.daily_path}")
+        print(f"summary_csv_path={result.summary_csv_path}")
+        print(f"markdown_path={result.markdown_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "backtest-ranking-rotation":
+        try:
+            groups = parse_csv_values(args.groups, RankingRotationBacktestEngine.DEFAULT_GROUPS)
+            result = RankingRotationBacktestEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                variant=args.variant,
+                groups=groups,
+                top_k=args.top_k,
+                candidate_buffer_k=args.candidate_buffer_k,
+                drop_n=args.drop_n,
+                max_positions=args.max_positions,
+                min_score_edge=args.min_score_edge,
+                min_holding_days=args.min_holding_days,
+                rotation_min_holding_days=args.rotation_min_holding_days,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                market_min_breadth=args.market_min_breadth,
+                market_min_return_20d=args.market_min_return_20d,
+                risk_off_cash_guard=args.risk_off_cash_guard,
+                risk_off_exit=args.risk_off_exit,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Ranking rotation backtest completed")
+        print(f"start_trade_date={result.start_trade_date}")
+        print(f"end_trade_date={result.end_trade_date}")
+        print(f"variant={result.variant}")
+        print(f"top_k={result.top_k}")
+        print(f"candidate_buffer_k={result.candidate_buffer_k}")
+        print(f"drop_n={result.drop_n}")
+        print(f"initial_cash={result.initial_cash}")
+        print(f"ending_equity={result.ending_equity}")
+        print(f"total_return={result.total_return}")
+        print(f"annual_return={result.annual_return}")
+        print(f"max_drawdown={result.max_drawdown}")
+        print(f"sharpe={result.sharpe}")
+        print(f"turnover={result.turnover}")
+        print(f"trade_count={result.trade_count}")
+        print(f"sell_trade_count={result.sell_trade_count}")
+        print(f"win_rate={result.win_rate}")
+        print(f"risk_off_days={result.risk_off_days}")
+        print(f"average_position_count={result.average_position_count}")
+        print(f"average_invested_ratio={result.average_invested_ratio}")
+        print(f"equity_curve_path={result.equity_curve_path}")
+        print(f"trade_log_path={result.trade_log_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "study-recipe-comparison":
+        try:
+            recipes = parse_csv_values(args.recipes, []) if args.recipes else None
+            groups = parse_csv_values(args.groups, RecipeComparisonStudyEngine.DEFAULT_GROUPS)
+            horizons = parse_horizons(args.horizons, RecipeComparisonStudyEngine.DEFAULT_HORIZONS)
+            result = RecipeComparisonStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                recipes=recipes,
+                groups=groups,
+                top_n_per_recipe=args.top_n_per_recipe,
+                horizons=horizons,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Recipe comparison study completed")
+        print(f"start_entry_date={result.start_entry_date}")
+        print(f"end_entry_date={result.end_entry_date}")
+        print(f"start_signal_date={result.start_signal_date}")
+        print(f"end_signal_date={result.end_signal_date}")
+        print(f"recipes={','.join(result.recipes)}")
+        print(f"horizons={','.join(str(value) for value in result.horizons)}")
+        print(f"event_count={result.event_count}")
+        print(f"events_path={result.events_path}")
+        print(f"daily_path={result.daily_path}")
+        print(f"summary_csv_path={result.summary_csv_path}")
+        print(f"exposure_path={result.exposure_path}")
+        print(f"portfolio_path={result.portfolio_path}")
+        print(f"portfolio_summary_path={result.portfolio_summary_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "backtest-full-a-momentum":
+        try:
+            groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
+            if args.recipe:
+                recipe = full_a_momentum_recipe(config, recipe_id=args.recipe, name=args.recipe)
+                engine = FullAMomentumBacktestEngine.from_recipe(
+                    config=config,
+                    repository=repository,
+                    base_dir=base_dir,
+                    recipe=recipe,
+                )
+            else:
+                engine = FullAMomentumBacktestEngine(
+                    config=config,
+                    repository=repository,
+                    base_dir=base_dir,
+                    top_n=args.top_n,
+                    hold_days=args.hold_days,
+                    max_hold_days=args.max_hold_days,
+                    max_positions=args.max_positions,
+                    groups=groups,
+                    selection_variant=args.selection_variant,
+                    min_avg_amount_yuan=args.min_avg_amount_yuan,
+                    market_min_breadth=args.market_min_breadth,
+                    market_min_return_20d=args.market_min_return_20d,
+                    style_min_breadth=args.style_min_breadth,
+                    style_min_return_20d=args.style_min_return_20d,
+                    style_score_weight=args.style_score_weight,
+                    hard_exit_days=args.hard_exit_days,
+                    exit_ma20_break=args.exit_ma20_break,
+                    exit_failure_days=args.exit_failure_days,
+                    exit_failure_min_peak_profit_pct=args.exit_failure_min_peak_profit_pct,
+                    exit_adaptive_trailing=args.exit_adaptive_trailing,
+                    exit_atr_multiplier=args.exit_atr_multiplier,
+                    exit_market_risk=args.exit_market_risk,
+                    exit_industry_weak=args.exit_industry_weak,
+                    exit_relative_weak=args.exit_relative_weak,
+                    exit_relative_weak_5d_pct=args.exit_relative_weak_5d_pct,
+                    exit_relative_weak_20d_pct=args.exit_relative_weak_20d_pct,
+                    exit_volume_stall=args.exit_volume_stall,
+                    exit_volume_stall_ratio=args.exit_volume_stall_ratio,
+                    exit_upper_shadow=args.exit_upper_shadow,
+                    exit_upper_shadow_pct=args.exit_upper_shadow_pct,
+                    exit_profile=args.exit_profile,
+                )
+            result = engine.run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,
                 end_date=_parse_date(args.end_date) if args.end_date else None,
             )
@@ -732,6 +994,46 @@ def main() -> int:
         print(f"win_rate={result.win_rate}")
         print(f"equity_curve_path={result.equity_curve_path}")
         print(f"trade_log_path={result.trade_log_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "study-risk-off-standalone":
+        try:
+            groups = parse_csv_values(args.groups, RiskOffStandaloneStudyEngine.DEFAULT_GROUPS)
+            horizons = parse_horizons(args.horizons, RiskOffStandaloneStudyEngine.DEFAULT_HORIZONS)
+            result = RiskOffStandaloneStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                top_n=args.top_n,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                defensive_min_avg_amount_yuan=args.defensive_min_avg_amount_yuan,
+                groups=groups,
+                horizons=horizons,
+                market_min_breadth=args.market_min_breadth,
+                market_min_return_20d=args.market_min_return_20d,
+                check_external=args.check_external,
+                external_timeout_seconds=args.external_timeout_seconds,
+            ).run(
+                start_date=_parse_date(args.start_date) if args.start_date else None,
+                end_date=_parse_date(args.end_date) if args.end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        print("Standalone risk-off study completed")
+        print(f"start_entry_date={result.start_entry_date}")
+        print(f"end_entry_date={result.end_entry_date}")
+        print(f"start_signal_date={result.start_signal_date}")
+        print(f"end_signal_date={result.end_signal_date}")
+        print(f"risk_off_days={result.risk_off_days}")
+        print(f"event_count={result.event_count}")
+        print(f"events_path={result.events_path}")
+        print(f"daily_path={result.daily_path}")
+        print(f"summary_csv_path={result.summary_csv_path}")
+        print(f"data_health_path={result.data_health_path}")
+        print(f"markdown_path={result.markdown_path}")
         print(f"summary_path={result.summary_path}")
         return 0
 
