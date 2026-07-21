@@ -17,6 +17,7 @@
 ```text
 a-share-v1-signal/
 ├── configs/
+├── frontend/              # Vue 3 + TypeScript + ECharts 策略控制台
 ├── data/
 │   ├── processed/
 │   └── raw/
@@ -31,7 +32,8 @@ a-share-v1-signal/
 │       ├── portfolio/
 │       ├── report/
 │       ├── scheduler/
-│       └── strategy/
+│       ├── strategy/
+│       └── web/           # FastAPI、SQLite 索引与研究任务队列
 └── tests/
 ```
 
@@ -88,7 +90,61 @@ ashare-signal backtest \
   --end-date 2026-04-07
 ```
 
-7. 同步模拟仓位并生成下一交易日信号
+7. 生成研究用横截面排名快照
+
+```bash
+ashare-signal study-ranking \
+  --config configs/strategy.toml.example \
+  --as-of 2026-04-07 \
+  --variant quality_momentum_rank
+```
+
+这个命令只输出研究文件，不影响 `generate-signal`、模拟持仓或定时任务。
+
+8. 运行排名事件研究
+
+```bash
+ashare-signal study-ranking-events \
+  --config configs/strategy.toml.example \
+  --start-date 2026-03-02 \
+  --end-date 2026-05-28 \
+  --variant quality_momentum_rank \
+  --top-ks 5,10,20 \
+  --horizons 1,3,5,10
+```
+
+这个命令用于验证 TopK、分层收益、RankIC 和排名衰减，产物输出到 `reports/generated/ranking-events/`。
+
+9. 运行 TopK/DropN 排名轮动回测
+
+```bash
+ashare-signal backtest-ranking-rotation \
+  --config configs/strategy.toml.example \
+  --start-date 2024-05-29 \
+  --end-date 2026-05-28 \
+  --variant quality_momentum_rank \
+  --top-k 5 \
+  --candidate-buffer-k 20 \
+  --rebalance-interval-days 1 \
+  --drop-n 1
+```
+
+这个命令用于 Phase BQ-3 试运行，按 T 日排名、T+1 开盘限价近似执行，普通排名轮动只在再平衡日最多替换 1 只。
+
+10. 运行多 recipe 对照实验
+
+```bash
+ashare-signal study-recipe-comparison \
+  --config configs/strategy.toml.example \
+  --start-date 2026-03-02 \
+  --end-date 2026-05-28 \
+  --top-n-per-recipe 5 \
+  --horizons 1,3,5,10
+```
+
+这个命令用于 Phase JQ-3 研究，比较配置化 recipe、组合 recipe 和质量动量排名的统一事件表现，并输出等权日篮子组合曲线，产物输出到 `reports/generated/recipe-comparison/`。
+
+11. 同步模拟仓位并生成下一交易日信号
 
 ```bash
 ashare-signal paper-trade \
@@ -97,13 +153,13 @@ ashare-signal paper-trade \
   --end-date 2026-04-07
 ```
 
-8. 构建 Docker 镜像
+12. 构建 Docker 镜像
 
 ```bash
 docker build -t ashare-signal .
 ```
 
-9. 用 Docker 运行
+13. 用 Docker 运行
 
 ```bash
 docker run --rm -it \
@@ -116,7 +172,7 @@ docker run --rm -it \
   --end-date 2026-04-07
 ```
 
-10. 一次性执行每日完整流程
+14. 一次性执行每日完整流程
 
 ```bash
 ashare-signal run-daily \
@@ -125,13 +181,71 @@ ashare-signal run-daily \
 
 这个命令会同步 Tushare、构建最新 universe、按 `[backtest].initial_cash` 重算模拟仓位，并生成下一交易日信号。
 
-11. 用 Docker Compose 启动每日定时容器
+15. 用 Docker Compose 启动每日定时容器
 
 ```bash
 docker compose up -d --build ashare-signal-daily
 ```
 
 默认读取 `configs/strategy.toml.example` 中的 `[runtime].daily_run_time`，按北京时间每天执行一次。
+Tianzhu9 飞书发送容器默认在北京时间 `09:05` 运行，以便在 A 股 09:25 开盘前使用前一晚美股收盘数据做盘前过滤。
+
+## 策略可视化控制台
+
+控制台是局域网内使用的日线研究工具。它读取现有行情、模拟盘状态和研究产物，不接管 scheduler，不允许修改生产策略或模拟仓位。网页发起的回测始终使用受限参数构造 `backtest-full-a-momentum` research-only 命令。
+
+后端本地启动：
+
+```bash
+source .venv/bin/activate
+pip install -e .
+ashare-signal-web
+```
+
+前端开发启动：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+开发模式访问 `http://localhost:5173`，Vite 会将 `/api` 代理到 `http://127.0.0.1:8787`。
+
+构建前端并由 FastAPI 直接提供：
+
+```bash
+cd frontend
+npm run lint
+npm run typecheck
+npm run build
+cd ..
+ashare-signal-web
+```
+
+访问 `http://localhost:8787`；同一可信局域网内可使用 `http://<宿主机局域网 IP>:8787`。原生服务默认监听
+`0.0.0.0`，可通过 `ASHARE_WEB_HOST` 覆盖。局域网无登录模式只适合可信内网，不应配置公网端口映射。
+
+Docker Compose 常驻运行：
+
+```bash
+docker compose up -d --build ashare-signal-web
+docker compose ps ashare-signal-web
+```
+
+默认端口为 `8787`，可通过 `ASHARE_WEB_PORT` 修改。SQLite 索引位于 `data/processed/dashboard/dashboard.sqlite3`，可随时从 `reports/generated` 重建。
+
+OrbStack 的 `Expose ports to LAN` 关闭时，会把默认 Compose 发布端口限制在 `127.0.0.1`。可在 `.env` 中把
+`ASHARE_WEB_BIND_ADDRESS` 设置为宿主机局域网地址（例如 `192.168.9.188`），仅在该网卡上发布本服务；也可在可信网络中启用
+OrbStack 的全局 LAN 端口设置。全局设置会影响所有已发布的容器端口，不应在不可信网络中开启。
+
+控制台包含：
+
+- 今日交易台：模拟账户、最新计划、Top20 候选和市场门控原因
+- 个股详情：不复权日 K、MA5/10/20/60、成交量、T 日信号和 T+1 实际成交
+- 回测实验：白名单核心参数、基线差异和单任务后台队列
+- 策略对比：统一指标、净值/回撤/超额曲线、五类指数基准及交易归因
+- 任务与数据：任务日志、数据健康、结果归档和受保护删除
 
 ## 当前命令
 
@@ -143,6 +257,18 @@ docker compose up -d --build ashare-signal-daily
   - 从本地 universe 快照和当前持仓 CSV 生成一份真实 Markdown 信号板
 - `ashare-signal backtest`
   - 基于缓存日线和当前选股规则运行真实日频 T+1 回测
+- `ashare-signal study-ranking`
+  - 从本地缓存构建研究用横截面排名快照，输出排名 CSV、TopN Markdown 和因子映射表
+- `ashare-signal study-ranking-events`
+  - 验证排名 TopK 的未来收益、分层收益、RankIC、risk-on/off 拆分和排名衰减
+- `ashare-signal backtest-ranking-rotation`
+  - 基于排名执行 TopK/DropN 研究回测，输出 equity、trades 和 summary，不影响生产信号
+- `ashare-signal study-recipe-comparison`
+  - 对配置化 recipe、组合 recipe 和质量动量排名做统一事件对照，输出 summary、events、daily、exposure 和 portfolio
+- `ashare-signal study-risk-off-standalone`
+  - 独立研究 `risk_off` 期间的防御/弹性候选机会，只输出研究报告，不影响主策略、日报或模拟持仓
+- `ashare-signal study-exit-timing`
+  - 冻结基线 BUY 事件，对退出规则做 T+1、成本、限价未成交约束下的 MFE/MAE、峰值保留率和退出后 5/10/20 日反事实研究；只输出研究报告，不影响生产配置或调度
 - `ashare-signal paper-trade`
   - 基于同一套回测逻辑同步模拟仓位、持仓快照、最新盈亏和下一交易日信号
 - `ashare-signal run-daily`
@@ -200,6 +326,11 @@ docker compose up -d --build ashare-signal-daily
 - 成本包含：
   - 佣金 `commission_rate`
   - 卖出印花税 `stamp_duty_rate`
+- 市场广度分层：
+  - `market_min_breadth` 以上正常开仓
+  - 默认 `defensive_market_min_breadth = market_min_breadth`，等效关闭弱市小仓位开仓
+  - 若手动把 `defensive_market_min_breadth` 调低，则两条线之间只允许小仓位尝试最强风格
+  - 低于 `defensive_market_min_breadth` 不新开仓
 - 产出：
   - 回测 summary JSON
   - equity curve CSV

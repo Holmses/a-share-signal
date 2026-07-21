@@ -1,4 +1,35 @@
 services:
+  ashare-signal-web:
+    build: .
+    image: ashare-signal:latest
+    container_name: ashare-signal-web
+    entrypoint:
+      - ashare-signal-web
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      ASHARE_CONFIG: ${ASHARE_CONFIG:-configs/strategy.toml.example}
+      ASHARE_FRONTEND_DIST: /opt/a-share-dashboard
+      ASHARE_WEB_HOST: 0.0.0.0
+      ASHARE_WEB_PORT: 8787
+    ports:
+      - "${ASHARE_WEB_BIND_ADDRESS:-0.0.0.0}:${ASHARE_WEB_PORT:-8787}:8787"
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   ashare-signal-daily:
     build: .
     image: ashare-signal:latest
@@ -32,7 +63,7 @@ services:
       - --config
       - ${ASHARE_CONFIG:-configs/strategy.toml.example}
       - --run-at
-      - ${TIANZHU9_RUN_AT:-18:45}
+      - ${TIANZHU9_RUN_AT:-09:05}
       - --positions
       - data/positions/tianzhu9_positions.csv
     restart: unless-stopped
