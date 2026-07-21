@@ -56,6 +56,12 @@ STANDARD_SELL_REASONS: dict[str, SellReasonDefinition] = {
         "Market risk exit",
         "Market gate moved to risk-off and the strategy requires an exit.",
     ),
+    "risk_off_failed_hard_exit": SellReasonDefinition(
+        "risk_off_failed_hard_exit",
+        "risk",
+        "Risk-off failed hard exit",
+        "Position failed to reach the winner peak threshold and hit the shorter risk-off hard-exit period.",
+    ),
     "industry_weak_exit": SellReasonDefinition(
         "industry_weak_exit",
         "risk",
@@ -97,6 +103,24 @@ STANDARD_SELL_REASONS: dict[str, SellReasonDefinition] = {
         "strategy",
         "Failure exit",
         "Position failed to develop after the configured observation period.",
+    ),
+    "high_drawdown_exit": SellReasonDefinition(
+        "high_drawdown_exit",
+        "trend",
+        "High drawdown exit",
+        "Price retraced from the highest observed price by the configured amount.",
+    ),
+    "chandelier_exit": SellReasonDefinition(
+        "chandelier_exit",
+        "trend",
+        "Chandelier exit",
+        "Price fell below the highest price minus the configured ATR multiple.",
+    ),
+    "trend_decay_exit": SellReasonDefinition(
+        "trend_decay_exit",
+        "trend",
+        "Trend decay exit",
+        "Short and medium trend structure weakened below MA20.",
     ),
     "volume_stall_exit": SellReasonDefinition(
         "volume_stall_exit",

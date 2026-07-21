@@ -31,6 +31,15 @@ class Tianzhu9Position:
     entry_reason: str | None = None
     market_state: str | None = None
     style_group: str | None = None
+    selection_variant: str | None = None
+    selection_score: float | None = None
+    selection_rank: int | None = None
+    selection_score_explain: str | None = None
+    ranking_variant: str | None = None
+    ranking_score: float | None = None
+    ranking_position: int | None = None
+    ranking_score_explain: str | None = None
+    ranking_factor_scores: str | None = None
 
 
 @dataclass(slots=True)
@@ -55,6 +64,15 @@ class Tianzhu9Trade:
     market_state: str | None = None
     style_group: str | None = None
     holding_days: int | None = None
+    selection_variant: str | None = None
+    selection_score: float | None = None
+    selection_rank: int | None = None
+    selection_score_explain: str | None = None
+    ranking_variant: str | None = None
+    ranking_score: float | None = None
+    ranking_position: int | None = None
+    ranking_score_explain: str | None = None
+    ranking_factor_scores: str | None = None
 
 
 @dataclass(slots=True)

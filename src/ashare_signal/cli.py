@@ -5,18 +5,24 @@ from datetime import date
 from pathlib import Path
 
 from ashare_signal.backtest.engine import BacktestEngine
+from ashare_signal.backtest.exit_timing_study import DEFAULT_EXIT_CANDIDATES
+from ashare_signal.backtest.exit_timing_study import DEFAULT_POST_EXIT_HORIZONS
+from ashare_signal.backtest.exit_timing_study import ExitTimingStudyEngine
 from ashare_signal.backtest.full_a_recipes import FullARecipeStudyEngine
 from ashare_signal.backtest.full_a_momentum import FullAMomentumBacktestEngine
 from ashare_signal.backtest.ranking_event_study import RankingEventStudyEngine
 from ashare_signal.backtest.ranking_rotation import RankingRotationBacktestEngine
 from ashare_signal.backtest.ranking_study import RankingStudyEngine
 from ashare_signal.backtest.recipe_comparison import RecipeComparisonStudyEngine
+from ashare_signal.backtest.risk_off_defensive_sleeve import DEFAULT_ALLOWED_RISK_OFF_TYPES
+from ashare_signal.backtest.risk_off_defensive_sleeve import RiskOffDefensiveSleeveStudyEngine
 from ashare_signal.backtest.risk_off_standalone import RiskOffStandaloneStudyEngine
 from ashare_signal.backtest.selection_event_study import SelectionEventStudyEngine
 from ashare_signal.backtest.selection_event_study import parse_csv_values, parse_horizons
 from ashare_signal.backtest.tianzhu9_like import Tianzhu9LikeBacktestEngine
 from ashare_signal.config import load_config, load_env_file
 from ashare_signal.data.repository import DataRepository
+from ashare_signal.ml.trend_lightgbm import LightGBMTrendStudyEngine, parse_top_ks
 from ashare_signal.portfolio.manager import PortfolioManager
 from ashare_signal.scheduler.daily import run_daily_workflow, run_scheduler
 from ashare_signal.scheduler.jobs import run_daily_signal_job
@@ -286,6 +292,30 @@ def _build_parser() -> argparse.ArgumentParser:
     ranking_events.add_argument("--market-min-breadth", type=float, default=0.50)
     ranking_events.add_argument("--market-min-return-20d", type=float, default=0.0)
 
+    ml_trend = subparsers.add_parser(
+        "study-ml-trend-lightgbm",
+        help="Train a LightGBM trend-continuation model on prior data and backtest recent data",
+    )
+    ml_trend.add_argument("--config", default="configs/strategy.toml.example")
+    ml_trend.add_argument("--backtest-start-date", default=None)
+    ml_trend.add_argument("--backtest-end-date", default=None)
+    ml_trend.add_argument("--horizon", type=int, default=10)
+    ml_trend.add_argument("--train-trade-days", type=int, default=504)
+    ml_trend.add_argument("--backtest-trade-days", type=int, default=504)
+    ml_trend.add_argument("--top-ks", default="5,10,20")
+    ml_trend.add_argument("--groups", default="main,chinext,star")
+    ml_trend.add_argument("--max-rank-position", type=int, default=300)
+    ml_trend.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
+    ml_trend.add_argument("--positive-return-threshold", type=float, default=0.05)
+    ml_trend.add_argument("--positive-max-drawdown", type=float, default=-0.08)
+    ml_trend.add_argument("--negative-return-threshold", type=float, default=0.0)
+    ml_trend.add_argument("--negative-max-drawdown", type=float, default=-0.10)
+    ml_trend.add_argument(
+        "--allow-short-train",
+        action="store_true",
+        help="Allow using less than --train-trade-days when local cache lacks the full prior training window.",
+    )
+
     recipe_comparison = subparsers.add_parser(
         "study-recipe-comparison",
         help="Compare configured strategy recipes on one research event-study surface",
@@ -315,6 +345,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ranking_rotation.add_argument("--min-score-edge", type=float, default=0.02)
     ranking_rotation.add_argument("--min-holding-days", type=int, default=3)
     ranking_rotation.add_argument("--rotation-min-holding-days", type=int, default=5)
+    ranking_rotation.add_argument("--rebalance-interval-days", type=int, default=1)
     ranking_rotation.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
     ranking_rotation.add_argument("--market-min-breadth", type=float, default=0.50)
     ranking_rotation.add_argument("--market-min-return-20d", type=float, default=0.0)
@@ -343,9 +374,19 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--min-avg-amount-yuan", type=float, default=50000000.0)
     full_a_momentum.add_argument("--market-min-breadth", type=float, default=0.50)
     full_a_momentum.add_argument("--market-min-return-20d", type=float, default=0.0)
+    full_a_momentum.add_argument("--defensive-market-min-breadth", type=float, default=0.35)
+    full_a_momentum.add_argument("--defensive-position-size-multiplier", type=float, default=0.50)
+    full_a_momentum.add_argument("--aggressive-position-size-multiplier", type=float, default=1.0)
+    full_a_momentum.add_argument("--entry-market-states", default="normal,aggressive,defensive")
     full_a_momentum.add_argument("--style-min-breadth", type=float, default=0.48)
     full_a_momentum.add_argument("--style-min-return-20d", type=float, default=-0.01)
     full_a_momentum.add_argument("--style-score-weight", type=float, default=0.06)
+    full_a_momentum.add_argument(
+        "--style-score-weight-active",
+        type=float,
+        default=None,
+        help="Override style score weight only in normal/aggressive market states",
+    )
     full_a_momentum.add_argument("--exit-profile", choices=EXIT_PROFILES, default=DEFAULT_EXIT_PROFILE)
     full_a_momentum.add_argument("--hard-exit-days", type=int, default=DEFAULT_HARD_EXIT_DAYS)
     full_a_momentum.add_argument("--exit-ma20-break", action="store_true")
@@ -358,6 +399,7 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--exit-adaptive-trailing", action="store_true")
     full_a_momentum.add_argument("--exit-atr-multiplier", type=float, default=1.5)
     full_a_momentum.add_argument("--exit-market-risk", action="store_true")
+    full_a_momentum.add_argument("--exit-style-rotation", action="store_true")
     full_a_momentum.add_argument("--exit-industry-weak", action="store_true")
     full_a_momentum.add_argument("--exit-relative-weak", action="store_true")
     full_a_momentum.add_argument("--exit-relative-weak-5d-pct", type=float, default=0.04)
@@ -367,6 +409,35 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--exit-volume-stall-ratio", type=float, default=DEFAULT_VOLUME_STALL_RATIO)
     full_a_momentum.add_argument("--exit-upper-shadow", action="store_true")
     full_a_momentum.add_argument("--exit-upper-shadow-pct", type=float, default=0.45)
+    full_a_momentum.add_argument(
+        "--exit-high-drawdown-pct",
+        type=float,
+        default=None,
+        help="Research: exit after a five-day minimum when drawdown from the highest price reaches this value.",
+    )
+    full_a_momentum.add_argument(
+        "--exit-chandelier-atr-multiplier",
+        type=float,
+        default=None,
+        help="Research: exit below highest price minus this ATR20 multiple after five days.",
+    )
+    full_a_momentum.add_argument(
+        "--exit-trend-decay",
+        action="store_true",
+        help="Research: exit when close < MA20, MA5 < MA10, and five-day return is negative.",
+    )
+    full_a_momentum.add_argument(
+        "--exit-winner-hard-exit-bypass-peak-pct",
+        type=float,
+        default=None,
+        help="Research: skip hard exit once a position has reached this peak profit.",
+    )
+    full_a_momentum.add_argument(
+        "--exit-risk-off-failed-hard-exit-days",
+        type=int,
+        default=None,
+        help="Research: shorter hard exit in risk-off only for positions below winner peak threshold.",
+    )
     full_a_momentum.add_argument("--enabled-recipes", default="momentum_core")
     full_a_momentum.add_argument("--overlay-recipes", default="")
     full_a_momentum.add_argument("--quality-filter-enabled", action="store_true")
@@ -374,6 +445,24 @@ def _build_parser() -> argparse.ArgumentParser:
     full_a_momentum.add_argument("--quality-filter-score-bonus", type=float, default=0.02)
     full_a_momentum.add_argument("--overlay-score-bonus", type=float, default=0.03)
     full_a_momentum.add_argument("--overlay-max-daily-candidates", type=int, default=2)
+    full_a_momentum.add_argument("--ml-predictions-path", default=None)
+    full_a_momentum.add_argument("--ml-min-trend-prob", type=float, default=None)
+    full_a_momentum.add_argument("--ml-score-weight", type=float, default=0.0)
+    full_a_momentum.add_argument("--theme-buy-point-overlay", action="store_true")
+    full_a_momentum.add_argument("--theme-overlay-max-daily-candidates", type=int, default=1)
+    full_a_momentum.add_argument("--theme-overlay-score-bonus", type=float, default=0.04)
+    full_a_momentum.add_argument("--theme-overlay-position-size-multiplier", type=float, default=0.50)
+
+    exit_timing = subparsers.add_parser(
+        "study-exit-timing",
+        help="Compare exit rules on a frozen baseline entry set",
+    )
+    exit_timing.add_argument("--config", default="configs/strategy.toml.example")
+    exit_timing.add_argument("--trades-path", required=True)
+    exit_timing.add_argument("--equity-path", required=True)
+    exit_timing.add_argument("--candidates", default=",".join(DEFAULT_EXIT_CANDIDATES))
+    exit_timing.add_argument("--max-horizon-days", type=int, default=80)
+    exit_timing.add_argument("--post-exit-horizons", default="5,10,20")
 
     full_a_recipes = subparsers.add_parser(
         "study-full-a-recipes",
@@ -407,6 +496,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Check observation-only external sources such as JunQuant's public risk score API.",
     )
     risk_off_standalone.add_argument("--external-timeout-seconds", type=float, default=10.0)
+
+    risk_off_sleeve = subparsers.add_parser(
+        "study-risk-off-defensive-sleeve",
+        help="Backtest a research-only defensive sleeve against a baseline equity curve",
+    )
+    risk_off_sleeve.add_argument("--config", default="configs/strategy.toml.example")
+    risk_off_sleeve.add_argument("--events-path", required=True)
+    risk_off_sleeve.add_argument("--baseline-equity-path", required=True)
+    risk_off_sleeve.add_argument(
+        "--allowed-risk-off-types",
+        default=",".join(DEFAULT_ALLOWED_RISK_OFF_TYPES),
+    )
+    risk_off_sleeve.add_argument("--hold-days", type=int, default=10)
+    risk_off_sleeve.add_argument("--max-positions", type=int, default=2)
+    risk_off_sleeve.add_argument("--sleeve-fraction", type=float, default=0.20)
+    risk_off_sleeve.add_argument("--max-industry-weight", type=float, default=0.50)
+    risk_off_sleeve.add_argument("--cost-pct", type=float, default=0.0016)
+    risk_off_sleeve.add_argument("--lot-size", type=int, default=None)
+    risk_off_sleeve.add_argument("--no-exit-on-risk-on", action="store_true")
+    risk_off_sleeve.add_argument("--ignore-baseline-cash", action="store_true")
 
     tianzhu9_orders = subparsers.add_parser(
         "generate-tianzhu9-orders",
@@ -851,6 +960,52 @@ def main() -> int:
         print(f"summary_path={result.summary_path}")
         return 0
 
+    if args.command == "study-ml-trend-lightgbm":
+        try:
+            groups = parse_csv_values(args.groups, ["main", "chinext", "star"])
+            result = LightGBMTrendStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                horizon=args.horizon,
+                train_trade_days=args.train_trade_days,
+                backtest_trade_days=args.backtest_trade_days,
+                top_ks=parse_top_ks(args.top_ks),
+                max_rank_position=args.max_rank_position,
+                min_avg_amount_yuan=args.min_avg_amount_yuan,
+                groups=groups,
+                positive_return_threshold=args.positive_return_threshold,
+                positive_max_drawdown=args.positive_max_drawdown,
+                negative_return_threshold=args.negative_return_threshold,
+                negative_max_drawdown=args.negative_max_drawdown,
+                allow_short_train=args.allow_short_train,
+            ).run(
+                backtest_start_date=_parse_date(args.backtest_start_date) if args.backtest_start_date else None,
+                backtest_end_date=_parse_date(args.backtest_end_date) if args.backtest_end_date else None,
+            )
+        except FileNotFoundError as error:
+            parser.exit(1, f"Missing required input file: {error}. Run `ashare-signal sync-tushare` first.\n")
+        except (ModuleNotFoundError, RuntimeError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print("LightGBM trend study completed")
+        print(f"train_start_date={result.train_start_date}")
+        print(f"train_end_date={result.train_end_date}")
+        print(f"backtest_start_date={result.backtest_start_date}")
+        print(f"backtest_end_date={result.backtest_end_date}")
+        print(f"evaluated_backtest_end_date={result.evaluated_backtest_end_date}")
+        print(f"horizon={result.horizon}")
+        print(f"train_rows={result.train_rows}")
+        print(f"backtest_rows={result.backtest_rows}")
+        print(f"model_path={result.model_path}")
+        print(f"predictions_path={result.predictions_path}")
+        print(f"summary_csv_path={result.summary_csv_path}")
+        print(f"rolling_portfolio_summary_path={result.rolling_portfolio_summary_path}")
+        print(f"rolling_portfolio_equity_path={result.rolling_portfolio_equity_path}")
+        print(f"feature_importance_path={result.feature_importance_path}")
+        print(f"markdown_path={result.markdown_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
     if args.command == "backtest-ranking-rotation":
         try:
             groups = parse_csv_values(args.groups, RankingRotationBacktestEngine.DEFAULT_GROUPS)
@@ -867,6 +1022,7 @@ def main() -> int:
                 min_score_edge=args.min_score_edge,
                 min_holding_days=args.min_holding_days,
                 rotation_min_holding_days=args.rotation_min_holding_days,
+                rebalance_interval_days=args.rebalance_interval_days,
                 min_avg_amount_yuan=args.min_avg_amount_yuan,
                 market_min_breadth=args.market_min_breadth,
                 market_min_return_20d=args.market_min_return_20d,
@@ -887,6 +1043,7 @@ def main() -> int:
         print(f"top_k={result.top_k}")
         print(f"candidate_buffer_k={result.candidate_buffer_k}")
         print(f"drop_n={result.drop_n}")
+        print(f"rebalance_interval_days={result.rebalance_interval_days}")
         print(f"initial_cash={result.initial_cash}")
         print(f"ending_equity={result.ending_equity}")
         print(f"total_return={result.total_return}")
@@ -974,6 +1131,10 @@ def main() -> int:
             groups = parse_csv_values(args.groups, SelectionEventStudyEngine.DEFAULT_GROUPS)
             enabled_recipes = parse_csv_values(args.enabled_recipes, ["momentum_core"])
             overlay_recipes = parse_csv_values(args.overlay_recipes, [])
+            entry_market_states = parse_csv_values(
+                args.entry_market_states,
+                ["normal", "aggressive", "defensive"],
+            )
             if args.recipe:
                 recipe = full_a_momentum_recipe(config, recipe_id=args.recipe, name=args.recipe)
                 engine = FullAMomentumBacktestEngine.from_recipe(
@@ -988,6 +1149,25 @@ def main() -> int:
                     quality_filter_score_bonus=args.quality_filter_score_bonus,
                     overlay_score_bonus=args.overlay_score_bonus,
                     overlay_max_daily_candidates=args.overlay_max_daily_candidates,
+                    ml_predictions_path=base_dir / args.ml_predictions_path if args.ml_predictions_path else None,
+                    ml_min_trend_prob=args.ml_min_trend_prob,
+                    ml_score_weight=args.ml_score_weight,
+                    theme_buy_point_overlay=args.theme_buy_point_overlay,
+                    theme_overlay_max_daily_candidates=args.theme_overlay_max_daily_candidates,
+                    theme_overlay_score_bonus=args.theme_overlay_score_bonus,
+                    theme_overlay_position_size_multiplier=args.theme_overlay_position_size_multiplier,
+                    exit_market_risk=True if args.exit_market_risk else None,
+                    exit_style_rotation=True if args.exit_style_rotation else None,
+                    exit_high_drawdown_pct=args.exit_high_drawdown_pct,
+                    exit_chandelier_atr_multiplier=args.exit_chandelier_atr_multiplier,
+                    exit_trend_decay=args.exit_trend_decay,
+                    exit_winner_hard_exit_bypass_peak_pct=args.exit_winner_hard_exit_bypass_peak_pct,
+                    exit_risk_off_failed_hard_exit_days=args.exit_risk_off_failed_hard_exit_days,
+                    style_score_weight_active=args.style_score_weight_active,
+                    defensive_market_min_breadth=args.defensive_market_min_breadth,
+                    defensive_position_size_multiplier=args.defensive_position_size_multiplier,
+                    aggressive_position_size_multiplier=args.aggressive_position_size_multiplier,
+                    entry_market_states=entry_market_states,
                 )
             else:
                 engine = FullAMomentumBacktestEngine(
@@ -1003,9 +1183,14 @@ def main() -> int:
                     min_avg_amount_yuan=args.min_avg_amount_yuan,
                     market_min_breadth=args.market_min_breadth,
                     market_min_return_20d=args.market_min_return_20d,
+                    defensive_market_min_breadth=args.defensive_market_min_breadth,
+                    defensive_position_size_multiplier=args.defensive_position_size_multiplier,
+                    aggressive_position_size_multiplier=args.aggressive_position_size_multiplier,
+                    entry_market_states=entry_market_states,
                     style_min_breadth=args.style_min_breadth,
                     style_min_return_20d=args.style_min_return_20d,
                     style_score_weight=args.style_score_weight,
+                    style_score_weight_active=args.style_score_weight_active,
                     hard_exit_days=args.hard_exit_days,
                     exit_ma20_break=args.exit_ma20_break,
                     exit_failure_days=args.exit_failure_days,
@@ -1013,6 +1198,7 @@ def main() -> int:
                     exit_adaptive_trailing=args.exit_adaptive_trailing,
                     exit_atr_multiplier=args.exit_atr_multiplier,
                     exit_market_risk=args.exit_market_risk,
+                    exit_style_rotation=args.exit_style_rotation,
                     exit_industry_weak=args.exit_industry_weak,
                     exit_relative_weak=args.exit_relative_weak,
                     exit_relative_weak_5d_pct=args.exit_relative_weak_5d_pct,
@@ -1021,6 +1207,11 @@ def main() -> int:
                     exit_volume_stall_ratio=args.exit_volume_stall_ratio,
                     exit_upper_shadow=args.exit_upper_shadow,
                     exit_upper_shadow_pct=args.exit_upper_shadow_pct,
+                    exit_high_drawdown_pct=args.exit_high_drawdown_pct,
+                    exit_chandelier_atr_multiplier=args.exit_chandelier_atr_multiplier,
+                    exit_trend_decay=args.exit_trend_decay,
+                    exit_winner_hard_exit_bypass_peak_pct=args.exit_winner_hard_exit_bypass_peak_pct,
+                    exit_risk_off_failed_hard_exit_days=args.exit_risk_off_failed_hard_exit_days,
                     exit_profile=args.exit_profile,
                     enabled_recipes=enabled_recipes,
                     overlay_recipes=overlay_recipes,
@@ -1029,6 +1220,13 @@ def main() -> int:
                     quality_filter_score_bonus=args.quality_filter_score_bonus,
                     overlay_score_bonus=args.overlay_score_bonus,
                     overlay_max_daily_candidates=args.overlay_max_daily_candidates,
+                    ml_predictions_path=base_dir / args.ml_predictions_path if args.ml_predictions_path else None,
+                    ml_min_trend_prob=args.ml_min_trend_prob,
+                    ml_score_weight=args.ml_score_weight,
+                    theme_buy_point_overlay=args.theme_buy_point_overlay,
+                    theme_overlay_max_daily_candidates=args.theme_overlay_max_daily_candidates,
+                    theme_overlay_score_bonus=args.theme_overlay_score_bonus,
+                    theme_overlay_position_size_multiplier=args.theme_overlay_position_size_multiplier,
                 )
             result = engine.run(
                 start_date=_parse_date(args.start_date) if args.start_date else None,
@@ -1055,6 +1253,36 @@ def main() -> int:
         print(f"win_rate={result.win_rate}")
         print(f"equity_curve_path={result.equity_curve_path}")
         print(f"trade_log_path={result.trade_log_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "study-exit-timing":
+        try:
+            candidates = tuple(parse_csv_values(args.candidates, DEFAULT_EXIT_CANDIDATES))
+            post_exit_horizons = tuple(
+                parse_horizons(args.post_exit_horizons, DEFAULT_POST_EXIT_HORIZONS)
+            )
+            result = ExitTimingStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                trades_path=base_dir / args.trades_path,
+                equity_path=base_dir / args.equity_path,
+                candidates=candidates,
+                max_horizon_days=args.max_horizon_days,
+                post_exit_horizons=post_exit_horizons,
+            ).run()
+        except (FileNotFoundError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print("Frozen-entry exit timing study completed")
+        print(f"start_trade_date={result.start_trade_date}")
+        print(f"end_trade_date={result.end_trade_date}")
+        print(f"event_count={result.event_count}")
+        print(f"candidates={','.join(result.candidates)}")
+        print(f"events_path={result.events_path}")
+        print(f"summary_csv_path={result.summary_csv_path}")
+        print(f"attribution_path={result.attribution_path}")
+        print(f"markdown_path={result.markdown_path}")
         print(f"summary_path={result.summary_path}")
         return 0
 
@@ -1095,6 +1323,41 @@ def main() -> int:
         print(f"summary_csv_path={result.summary_csv_path}")
         print(f"data_health_path={result.data_health_path}")
         print(f"markdown_path={result.markdown_path}")
+        print(f"summary_path={result.summary_path}")
+        return 0
+
+    if args.command == "study-risk-off-defensive-sleeve":
+        try:
+            allowed_types = tuple(parse_csv_values(args.allowed_risk_off_types, DEFAULT_ALLOWED_RISK_OFF_TYPES))
+            result = RiskOffDefensiveSleeveStudyEngine(
+                config=config,
+                repository=repository,
+                base_dir=base_dir,
+                events_path=base_dir / args.events_path,
+                baseline_equity_path=base_dir / args.baseline_equity_path,
+                allowed_risk_off_types=allowed_types,
+                hold_days=args.hold_days,
+                max_positions=args.max_positions,
+                sleeve_fraction=args.sleeve_fraction,
+                max_industry_weight=args.max_industry_weight,
+                exit_on_risk_on=not args.no_exit_on_risk_on,
+                require_baseline_cash=not args.ignore_baseline_cash,
+                cost_pct=args.cost_pct,
+                lot_size=args.lot_size,
+            ).run()
+        except (FileNotFoundError, ValueError) as error:
+            parser.exit(1, f"{error}\n")
+        print("Risk-off defensive sleeve study completed")
+        print(f"total_return={result.total_return}")
+        print(f"max_drawdown={result.max_drawdown}")
+        print(f"sharpe={result.sharpe}")
+        print(f"combined_total_return={result.combined_total_return}")
+        print(f"combined_max_drawdown={result.combined_max_drawdown}")
+        print(f"combined_sharpe={result.combined_sharpe}")
+        print(f"trade_count={result.trade_count}")
+        print(f"active_days={result.active_days}")
+        print(f"equity_path={result.equity_path}")
+        print(f"trades_path={result.trades_path}")
         print(f"summary_path={result.summary_path}")
         return 0
 

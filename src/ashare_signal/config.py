@@ -16,6 +16,7 @@ class MarketConfig:
     benchmark: str
     max_positions: int
     min_position_holding_days: int
+    benchmarks: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -71,6 +72,8 @@ class SelectionConfig:
     rotation_edge: float = 0.25
     sell_health_exit_threshold: float = 0.35
     market_min_breadth: float = 0.35
+    defensive_market_min_breadth: float = 0.50
+    defensive_position_size_multiplier: float = 0.25
     buy_min_close_to_ma20: float = -0.03
     buy_max_close_to_ma20: float = 0.08
     buy_min_pullback_from_20d_high: float = -0.15
@@ -216,8 +219,13 @@ def load_config(config_path: str | Path) -> AppConfig:
     runtime = data.get("runtime", {})
     recipes = _load_recipe_configs(data.get("recipes", []))
 
+    market_values = dict(market)
+    market_values["benchmarks"] = tuple(
+        str(value) for value in market_values.get("benchmarks", (market_values["benchmark"],))
+    )
+
     return AppConfig(
-        market=MarketConfig(**market),
+        market=MarketConfig(**market_values),
         filters=FilterConfig(**filters),
         pricing=PricingConfig(**pricing),
         strategy=StrategyConfig(**strategy),

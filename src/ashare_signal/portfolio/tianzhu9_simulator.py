@@ -329,6 +329,7 @@ class Tianzhu9PaperBroker:
                 float(state["cash"]),
                 positions=positions,
                 order_count=len(buy_orders),
+                position_size_multiplier=float(order.get("position_size_multiplier") or 1.0),
             )
             if shares < int(self.config.backtest.lot_size):
                 continue
@@ -357,10 +358,18 @@ class Tianzhu9PaperBroker:
 
         return trades
 
-    def _buy_quantity(self, price: float, cash: float, positions: list[dict], order_count: int) -> int:
+    def _buy_quantity(
+        self,
+        price: float,
+        cash: float,
+        positions: list[dict],
+        order_count: int,
+        position_size_multiplier: float = 1.0,
+    ) -> int:
         equity = cash + sum(float(position["entry_price"]) * int(position["quantity"]) for position in positions)
         remaining_orders = max(order_count, 1)
-        target_value = min(equity / self.hold_days, cash / remaining_orders, cash)
+        multiplier = min(max(float(position_size_multiplier), 0.0), 1.0)
+        target_value = min((equity / self.hold_days) * multiplier, cash / remaining_orders, cash)
         return self._round_lot(int(target_value / price))
 
     def _affordable_quantity(self, price: float, cash: float) -> int:

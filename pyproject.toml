@@ -9,18 +9,25 @@ description = "A-share daily signal board skeleton for a 5-position swing strate
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "fastapi>=0.115",
   "pandas>=2.0",
   "tushare",
   "tomli>=2.0.0; python_version < '3.11'",
+  "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
 ]
+ml = [
+  "lightgbm>=4.0",
+  "scikit-learn>=1.4",
+]
 
 [project.scripts]
 ashare-signal = "ashare_signal.cli:main"
+ashare-signal-web = "ashare_signal.web.app:run"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

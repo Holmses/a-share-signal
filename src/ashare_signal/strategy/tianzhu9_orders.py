@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 import json
@@ -18,6 +18,9 @@ from ashare_signal.strategy.exit_rules import DEFAULT_VOLUME_STALL_EXIT, DEFAULT
 from ashare_signal.strategy.exit_rules import EXIT_PROFILES, LEGACY_EXIT_PROFILE
 from ashare_signal.strategy.exit_rules import SLOW_PROFIT_LOCK_PROFILE, SlowProfitLockExit
 from ashare_signal.strategy.exit_rules import slow_profit_lock_exit_signal, tiered_trailing_take_profit
+from ashare_signal.strategy.ranking import build_ranking_snapshot
+from ashare_signal.strategy.theme_alerts import StrongThemeAlert, build_strong_theme_alerts
+from ashare_signal.strategy.theme_alerts import format_theme_alert_brief
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
@@ -37,6 +40,7 @@ class Tianzhu9Order:
     unrealized_pnl: float | None = None
     unrealized_return: float | None = None
     holding_days: int | None = None
+    position_size_multiplier: float | None = None
 
 
 @dataclass(slots=True)
@@ -49,6 +53,7 @@ class Tianzhu9OrderPlan:
     notes: list[str]
     markdown_path: Path
     json_path: Path
+    theme_alerts: list[StrongThemeAlert] = field(default_factory=list)
 
 
 def generate_tianzhu9_order_plan(
@@ -124,6 +129,8 @@ def generate_tianzhu9_order_plan(
         min_avg_amount_yuan=min_avg_amount_yuan,
         market_min_breadth=0.50,
         market_min_return_20d=0.0,
+        defensive_market_min_breadth=getattr(config.selection, "defensive_market_min_breadth", 0.50),
+        defensive_position_size_multiplier=getattr(config.selection, "defensive_position_size_multiplier", 0.25),
         style_min_breadth=0.48,
         style_min_return_20d=-0.01,
         exit_profile=exit_profile,
@@ -133,12 +140,24 @@ def generate_tianzhu9_order_plan(
     signal_frame = factor_frame.loc[factor_frame["trade_date"].astype(str) == signal_trade_date].copy()
     style_state = engine._market_style_state(signal_frame)
     risk_off = bool(style_state["market_risk_off"])
+    market_state = str(style_state["market_state"])
+    market_breadth = float(style_state["market_breadth"])
+    market_return_20d = float(style_state["market_return_20d"])
     eligible_groups = set(style_state["eligible_groups"])
+    ranking_snapshot = build_ranking_snapshot(signal_frame, config, variant="quality_momentum_rank")
+    theme_alerts = build_strong_theme_alerts(
+        ranking_snapshot,
+        market_breadth=market_breadth,
+        market_return_20d=market_return_20d,
+        market_state=market_state,
+        signal_frame=signal_frame,
+    )
     selected = engine._select_candidates(
         signal_frame=signal_frame,
         eligible_groups=eligible_groups,
         excluded_symbols=set(),
         risk_off=risk_off,
+        market_state=market_state,
     )
     selected_symbols = {str(row["ts_code"]) for row in selected}
     selected_by_symbol = {str(row["ts_code"]): row for row in selected}
@@ -170,12 +189,18 @@ def generate_tianzhu9_order_plan(
         eligible_groups=eligible_groups,
     )
     notes = []
-    market_breadth = float(style_state["market_breadth"])
-    market_return_20d = float(style_state["market_return_20d"])
     if risk_off:
         notes.append(
             "全 A 严格过滤：市场风控未通过，"
             f"breadth={market_breadth:.2%}，20日中位收益={market_return_20d:.2%}，本次不新开仓。"
+        )
+    elif market_state == "defensive":
+        groups_text = _format_group_list(eligible_groups)
+        notes.append(
+            "全 A 分层风控：市场广度低于正常开仓线但高于弱市试仓线，"
+            f"breadth={market_breadth:.2%}，20日收益={market_return_20d:.2%}，"
+            f"仅允许小仓位尝试最强风格：{groups_text}，"
+            f"仓位系数={float(style_state['position_size_multiplier']):.0%}。"
         )
     else:
         groups_text = _format_group_list(eligible_groups)
@@ -224,6 +249,7 @@ def generate_tianzhu9_order_plan(
         sell_orders=sell_orders,
         hold_orders=hold_orders,
         notes=notes,
+        theme_alerts=theme_alerts,
         markdown_path=markdown_path,
         json_path=json_path,
     )
@@ -250,6 +276,9 @@ def render_tianzhu9_order_plan(plan: Tianzhu9OrderPlan) -> str:
     lines.extend(_render_sell_order_table(plan.sell_orders, empty="无卖出计划。"))
     lines.extend(["", "## 继续持有"])
     lines.extend(_render_hold_order_table(plan.hold_orders, empty="无继续持有。"))
+    if plan.theme_alerts:
+        lines.extend(["", "## 强主线预警（仅观察）"])
+        lines.extend(_render_theme_alert_table(plan.theme_alerts))
     if plan.notes:
         lines.extend(["", "## 备注"])
         lines.extend(f"- {note}" for note in plan.notes)
@@ -272,6 +301,11 @@ def plan_to_feishu_text(plan: Tianzhu9OrderPlan) -> str:
         for order in orders[:8]:
             lines.append(f"- {_render_order_text_line(order)}")
             lines.append(f"  {order.reason}")
+    if plan.theme_alerts:
+        lines.append("")
+        lines.append("强主线预警（仅观察）:")
+        for alert in plan.theme_alerts[:3]:
+            lines.append(f"- {format_theme_alert_brief(alert)}")
     if plan.notes:
         lines.append("")
         lines.append("备注:")
@@ -295,6 +329,13 @@ def _build_buy_orders(
             continue
         close_price = float(candidate["close"])
         limit_price = round(close_price * (1 + config.pricing.buy_markup), 2)
+        position_size_multiplier = float(candidate.get("position_size_multiplier") or 1.0)
+        reason = (
+            f"T-1 排名第 {int(candidate['rank'])}，买入限价 = T-1 收盘价 {close_price:.2f} "
+            f"* (1 + {config.pricing.buy_markup:.3%})。"
+        )
+        if position_size_multiplier < 1.0:
+            reason += f" 弱市最强风格试仓，仓位系数 {position_size_multiplier:.0%}。"
         orders.append(
             Tianzhu9Order(
                 action="BUY",
@@ -304,7 +345,8 @@ def _build_buy_orders(
                 quantity=None,
                 rank=int(candidate["rank"]),
                 score=float(candidate["score"]),
-                reason=f"T-1 排名第 {int(candidate['rank'])}，买入限价 = T-1 收盘价 {close_price:.2f} * (1 + {config.pricing.buy_markup:.3%})。",
+                reason=reason,
+                position_size_multiplier=position_size_multiplier,
             )
         )
     return orders
@@ -646,11 +688,12 @@ def _render_buy_order_table(orders: list[Tianzhu9Order], empty: str) -> list[str
             _format_price(order.limit_price, default="观察"),
             _format_rank(order.rank),
             _format_score(order.score),
+            _format_multiplier(order.position_size_multiplier),
             order.reason,
         ]
         for order in orders
     ]
-    return _render_markdown_table(["代码", "名称", "计划买入价", "rank", "score", "原因"], rows)
+    return _render_markdown_table(["代码", "名称", "计划买入价", "rank", "score", "仓位系数", "原因"], rows)
 
 
 def _render_sell_order_table(orders: list[Tianzhu9Order], empty: str) -> list[str]:
@@ -703,6 +746,54 @@ def _render_hold_order_table(orders: list[Tianzhu9Order], empty: str) -> list[st
     )
 
 
+def _render_theme_alert_table(alerts: list[StrongThemeAlert]) -> list[str]:
+    rows = []
+    for alert in alerts:
+        candidates = "、".join(
+            f"{candidate.symbol} {candidate.name}#{candidate.rank_position}"
+            for candidate in alert.top_candidates[:3]
+        )
+        buy_points = "、".join(
+            f"{candidate.symbol} {candidate.name}#{candidate.rank_position}"
+            for candidate in alert.buy_point_candidates[:3]
+        )
+        rows.append(
+            [
+                alert.industry,
+                str(alert.member_count),
+                str(alert.top_ranked_count),
+                _format_pct_unsigned(alert.top_ranked_share),
+                _format_score(alert.avg_rank_score),
+                _format_pct_unsigned(alert.median_momentum_rank),
+                _format_pct_unsigned(alert.median_trend_rank),
+                _format_pct_unsigned(alert.median_industry_rank),
+                alert.market_state,
+                _format_pct_unsigned(alert.market_breadth),
+                _format_pct(alert.market_return_20d),
+                candidates or "-",
+                buy_points or "-",
+            ]
+        )
+    return _render_markdown_table(
+        [
+            "行业",
+            "成员数",
+            "前排数量",
+            "前排占比",
+            "均分",
+            "动量",
+            "趋势",
+            "行业因子",
+            "市场状态",
+            "市场广度",
+            "20日收益",
+            "代表股",
+            "买点观察",
+        ],
+        rows,
+    )
+
+
 def _render_order_text_line(order: Tianzhu9Order) -> str:
     parts = [f"{order.symbol} {order.name}"]
     if order.action == "BUY":
@@ -725,6 +816,8 @@ def _render_order_text_line(order: Tianzhu9Order) -> str:
         parts.append(f"rank:{order.rank}")
     if order.score is not None:
         parts.append(f"score:{order.score:.4f}")
+    if order.action == "BUY" and order.position_size_multiplier is not None:
+        parts.append(f"仓位:{_format_multiplier(order.position_size_multiplier)}")
     return " ".join(parts)
 
 
@@ -756,6 +849,14 @@ def _format_signed_money(value: float | None) -> str:
 
 def _format_pct(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2%}"
+
+
+def _format_pct_unsigned(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2%}"
+
+
+def _format_multiplier(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0%}"
 
 
 def _format_quantity(value: int | None) -> str:
@@ -800,6 +901,7 @@ def _write_plan_json(plan: Tianzhu9OrderPlan, path: Path) -> None:
         "sell_orders": [asdict(order) for order in plan.sell_orders],
         "hold_orders": [asdict(order) for order in plan.hold_orders],
         "notes": plan.notes,
+        "theme_alerts": [asdict(alert) for alert in plan.theme_alerts],
         "markdown_path": str(plan.markdown_path),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

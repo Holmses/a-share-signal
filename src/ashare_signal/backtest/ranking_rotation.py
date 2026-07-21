@@ -58,6 +58,7 @@ class RankingRotationBacktestResult:
     top_k: int
     candidate_buffer_k: int
     drop_n: int
+    rebalance_interval_days: int
     initial_cash: float
     ending_equity: float
     total_return: float
@@ -105,6 +106,7 @@ class RankingRotationBacktestEngine:
         min_score_edge: float = 0.02,
         min_holding_days: int = 3,
         rotation_min_holding_days: int = 5,
+        rebalance_interval_days: int = 1,
         min_avg_amount_yuan: float = 50_000_000.0,
         market_min_breadth: float = 0.50,
         market_min_return_20d: float = 0.0,
@@ -126,6 +128,7 @@ class RankingRotationBacktestEngine:
         self.min_score_edge = float(min_score_edge)
         self.min_holding_days = max(int(min_holding_days), 0)
         self.rotation_min_holding_days = max(int(rotation_min_holding_days), 0)
+        self.rebalance_interval_days = max(int(rebalance_interval_days), 1)
         self.min_avg_amount_yuan = float(min_avg_amount_yuan)
         self.market_min_breadth = float(market_min_breadth)
         self.market_min_return_20d = float(market_min_return_20d)
@@ -196,12 +199,14 @@ class RankingRotationBacktestEngine:
             )
             risk_off = market_state["market_state"] == "risk_off"
             feature_index = signal_frame.set_index("ts_code") if not signal_frame.empty else pd.DataFrame()
+            is_rebalance_day = trade_offset % self.rebalance_interval_days == 0
 
             sell_decisions = self._build_sell_decisions(
                 positions=positions,
                 ranking=ranking,
                 trade_index=trade_index,
                 risk_off=risk_off,
+                is_rebalance_day=is_rebalance_day,
             )
             sell_cash_box = {"cash": cash}
             total_traded_value += self._execute_sells(
@@ -227,6 +232,7 @@ class RankingRotationBacktestEngine:
                 positions=positions,
                 open_equity=open_equity,
                 risk_off=risk_off,
+                is_rebalance_day=is_rebalance_day,
                 trades=trades,
                 cash_ref=buy_cash_box,
             )
@@ -281,10 +287,14 @@ class RankingRotationBacktestEngine:
         ranking: pd.DataFrame,
         trade_index: int,
         risk_off: bool,
+        is_rebalance_day: bool = True,
     ) -> list[SellDecision]:
         if not positions:
             return []
         ranking_index = ranking.set_index("ts_code") if not ranking.empty else pd.DataFrame()
+        held_symbols = set(positions)
+        best_new = self._best_new_candidate(ranking, held_symbols)
+        rotation_allowed = is_rebalance_day and (not risk_off or not self.risk_off_cash_guard)
         decisions: list[SellDecision] = []
         for symbol, position in positions.items():
             holding_days = trade_index - position.entry_trade_index + 1
@@ -305,7 +315,14 @@ class RankingRotationBacktestEngine:
                         score=score,
                     )
                 )
-            elif rank_position > self.candidate_buffer_k and holding_days >= self.min_holding_days:
+            elif (
+                rotation_allowed
+                and rank_position > self.candidate_buffer_k
+                and holding_days >= self.min_holding_days
+                and best_new is not None
+                and score is not None
+                and float(best_new["rank_score"]) >= score + self.min_score_edge
+            ):
                 decisions.append(
                     SellDecision(
                         symbol=symbol,
@@ -315,29 +332,30 @@ class RankingRotationBacktestEngine:
                     )
                 )
 
-        if len(decisions) < self.drop_n and len(positions) >= self.max_positions and not risk_off and not ranking.empty:
-            held_symbols = set(positions)
-            best_new = ranking.loc[~ranking["ts_code"].isin(held_symbols)].head(self.top_k)
-            if not best_new.empty:
-                best = best_new.iloc[0]
-                weakest = self._weakest_holding(positions, ranking_index, trade_index)
-                if weakest is not None:
-                    weakest_position, weakest_rank, weakest_score = weakest
-                    holding_days = trade_index - weakest_position.entry_trade_index + 1
-                    already_selling = {decision.symbol for decision in decisions}
-                    if (
-                        weakest_position.symbol not in already_selling
-                        and holding_days >= self.rotation_min_holding_days
-                        and float(best["rank_score"]) >= weakest_score + self.min_score_edge
-                    ):
-                        decisions.append(
-                            SellDecision(
-                                symbol=weakest_position.symbol,
-                                reason="score_edge_rotation",
-                                rank_position=weakest_rank,
-                                score=weakest_score,
-                            )
+        if (
+            rotation_allowed
+            and len(decisions) < self.drop_n
+            and len(positions) >= self.max_positions
+            and best_new is not None
+        ):
+            weakest = self._weakest_holding(positions, ranking_index, trade_index)
+            if weakest is not None:
+                weakest_position, weakest_rank, weakest_score = weakest
+                holding_days = trade_index - weakest_position.entry_trade_index + 1
+                already_selling = {decision.symbol for decision in decisions}
+                if (
+                    weakest_position.symbol not in already_selling
+                    and holding_days >= self.rotation_min_holding_days
+                    and float(best_new["rank_score"]) >= weakest_score + self.min_score_edge
+                ):
+                    decisions.append(
+                        SellDecision(
+                            symbol=weakest_position.symbol,
+                            reason="score_edge_rotation",
+                            rank_position=weakest_rank,
+                            score=weakest_score,
                         )
+                    )
 
         decisions = sorted(
             decisions,
@@ -348,6 +366,17 @@ class RankingRotationBacktestEngine:
             ),
         )
         return decisions[: self.drop_n]
+
+    def _best_new_candidate(self, ranking: pd.DataFrame, held_symbols: set[str]) -> pd.Series | None:
+        if ranking.empty:
+            return None
+        best_new = ranking.loc[
+            (ranking["rank_position"] <= self.candidate_buffer_k)
+            & (~ranking["ts_code"].isin(held_symbols))
+        ].head(self.top_k)
+        if best_new.empty:
+            return None
+        return best_new.iloc[0]
 
     def _weakest_holding(
         self,
@@ -438,10 +467,13 @@ class RankingRotationBacktestEngine:
         positions: dict[str, RankingRotationPosition],
         open_equity: float,
         risk_off: bool,
+        is_rebalance_day: bool,
         trades: list[RankingRotationTrade],
         cash_ref: dict[str, float],
     ) -> float:
         if ranking.empty or open_equity <= 0 or len(positions) >= self.max_positions:
+            return 0.0
+        if not is_rebalance_day:
             return 0.0
         if self.risk_off_cash_guard and risk_off:
             return 0.0
@@ -567,6 +599,8 @@ class RankingRotationBacktestEngine:
         stem = (
             f"ranking-rotation-{self.variant.replace('_', '-')}-top{self.top_k}-"
             f"buffer{self.candidate_buffer_k}-drop{self.drop_n}-edge{edge_slug}-"
+            f"hold{self.min_holding_days}-rot{self.rotation_min_holding_days}-"
+            f"rebalance{self.rebalance_interval_days}-"
             f"{risk_slug}-"
             f"{resolved_start}-{resolved_end}"
         )
@@ -589,6 +623,7 @@ class RankingRotationBacktestEngine:
             "min_score_edge": self.min_score_edge,
             "min_holding_days": self.min_holding_days,
             "rotation_min_holding_days": self.rotation_min_holding_days,
+            "rebalance_interval_days": self.rebalance_interval_days,
             "risk_off_cash_guard": self.risk_off_cash_guard,
             "risk_off_exit": self.risk_off_exit,
             "market_filter": {
@@ -621,6 +656,7 @@ class RankingRotationBacktestEngine:
             top_k=self.top_k,
             candidate_buffer_k=self.candidate_buffer_k,
             drop_n=self.drop_n,
+            rebalance_interval_days=self.rebalance_interval_days,
             initial_cash=initial_cash,
             ending_equity=ending_equity,
             total_return=total_return,

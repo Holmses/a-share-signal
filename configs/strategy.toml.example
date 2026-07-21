@@ -1,6 +1,7 @@
 [market]
 name = "ashare"
 benchmark = "000300.SH"
+benchmarks = ["000300.SH", "000905.SH", "000852.SH", "399006.SZ", "000688.SH"]
 max_positions = 5
 min_position_holding_days = 1
 
@@ -55,6 +56,8 @@ min_buy_score = 0.60
 rotation_edge = 0.25
 sell_health_exit_threshold = 0.35
 market_min_breadth = 0.50
+defensive_market_min_breadth = 0.50
+defensive_position_size_multiplier = 0.25
 buy_min_close_to_ma20 = -0.03
 buy_max_close_to_ma20 = 0.05
 buy_min_pullback_from_20d_high = -0.15
