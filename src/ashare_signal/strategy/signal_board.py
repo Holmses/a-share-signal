@@ -63,6 +63,7 @@ class SignalStrategy:
         sell_candidates: list[Candidate],
         effective_date: date | None = None,
         notes: list[str] | None = None,
+        theme_alerts: list[str] | None = None,
     ) -> SignalBoard:
         default_notes = [
             "建议委托价为次交易日限价参考，不保证成交。",
@@ -76,4 +77,5 @@ class SignalStrategy:
             buy_signal=self.pick_buy_signal(buy_candidates),
             sell_signal=self.pick_sell_signal(sell_candidates),
             notes=default_notes + (notes or []),
+            theme_alerts=theme_alerts or [],
         )

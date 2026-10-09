@@ -49,3 +49,4 @@ class SignalBoard:
     buy_signal: TradeSignal | None
     sell_signal: TradeSignal | None
     notes: list[str] = field(default_factory=list)
+    theme_alerts: list[str] = field(default_factory=list)

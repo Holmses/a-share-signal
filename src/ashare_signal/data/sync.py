@@ -59,7 +59,15 @@ class TushareSyncService:
             (calendar["is_open"].astype(int) == 1) & (calendar_dates <= data_end_date)
         ].sort_values().tolist()
 
-        benchmark = self.repository.config.market.benchmark
+        primary_benchmark = self.repository.config.market.benchmark
+        benchmarks = tuple(
+            dict.fromkeys(
+                getattr(self.repository.config.market, "benchmarks", ())
+                or (primary_benchmark,)
+            )
+        )
+        if primary_benchmark not in benchmarks:
+            benchmarks = (primary_benchmark, *benchmarks)
         index_daily_files = 0
         index_daily_basic_files = 0
         index_classify_files = 0
@@ -68,11 +76,13 @@ class TushareSyncService:
 
         required_index_start = open_dates[0] if open_dates else normalized_start_date
         required_index_end = open_dates[-1] if open_dates else data_end_date
-        if not self._index_daily_cache_covers(
-            index_code=benchmark,
-            start_date=required_index_start,
-            end_date=required_index_end,
-        ):
+        for benchmark in benchmarks:
+            if self._index_daily_cache_covers(
+                index_code=benchmark,
+                start_date=required_index_start,
+                end_date=required_index_end,
+            ):
+                continue
             try:
                 index_daily = self.client.fetch_index_daily(
                     ts_code=benchmark,
@@ -83,7 +93,7 @@ class TushareSyncService:
                 index_daily = None
             if index_daily is not None and not index_daily.empty:
                 self.repository.save_index_daily(benchmark, index_daily)
-                index_daily_files = 1
+                index_daily_files += 1
 
         if not self.repository.index_classify_cache_exists(src="SW2021"):
             try:

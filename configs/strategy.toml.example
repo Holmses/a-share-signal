@@ -1,6 +1,7 @@
 [market]
 name = "ashare"
 benchmark = "000300.SH"
+benchmarks = ["000300.SH", "000905.SH", "000852.SH", "399006.SZ", "000688.SH"]
 max_positions = 5
 min_position_holding_days = 1
 
@@ -55,6 +56,8 @@ min_buy_score = 0.60
 rotation_edge = 0.25
 sell_health_exit_threshold = 0.35
 market_min_breadth = 0.50
+defensive_market_min_breadth = 0.50
+defensive_position_size_multiplier = 0.25
 buy_min_close_to_ma20 = -0.03
 buy_max_close_to_ma20 = 0.05
 buy_min_pullback_from_20d_high = -0.15
@@ -111,6 +114,30 @@ rebound_profit_lock_drawdown_pct = 0.06
 rebound_big_profit_trigger_pct = 0.25
 rebound_big_profit_drawdown_pct = 0.10
 rebound_profit_exit_min_pct = 0.15
+
+[[recipes]]
+name = "trend_pullback_rank"
+enabled = true
+max_positions = 3
+min_score = 0.60
+market_gate = "risk_on"
+factor_set = ["momentum", "trend", "pullback", "liquidity", "volatility"]
+sell_rules = ["rotation_rank_drop", "trailing_take_profit", "trend_break"]
+max_daily_buys = 1
+max_daily_sells = 1
+notes = ["Existing trend pullback selector leg expressed as a recipe; not yet wired into production execution."]
+
+[[recipes]]
+name = "rebound_bottoming_rank"
+enabled = true
+max_positions = 2
+min_score = 0.60
+market_gate = "risk_neutral_or_rebound"
+factor_set = ["drawdown", "stabilization", "moneyflow", "industry_rebound"]
+sell_rules = ["fast_failure_exit", "profit_lock", "signal_low_break"]
+max_daily_buys = 1
+max_daily_sells = 1
+notes = ["Existing bottoming rebound selector leg expressed as a recipe; not yet wired into production execution."]
 
 [paths]
 raw_data_dir = "data/raw"

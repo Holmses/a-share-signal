@@ -7,8 +7,10 @@ from ashare_signal.config import AppConfig
 from ashare_signal.data.repository import DataRepository
 from ashare_signal.portfolio.engine import PortfolioState
 from ashare_signal.report.render import render_markdown, write_markdown
+from ashare_signal.strategy.ranking import build_ranking_snapshot
 from ashare_signal.strategy.selector import UniverseSignalSelector
 from ashare_signal.strategy.signal_board import SignalStrategy
+from ashare_signal.strategy.theme_alerts import build_strong_theme_alerts, format_theme_alert_brief
 from ashare_signal.utils.dates import parse_compact_date, to_compact_date
 
 
@@ -50,6 +52,18 @@ def run_daily_signal_job(
         notes.append(calendar_note)
 
     universe = repository.load_universe_snapshot(actual_trade_date)
+    market_breadth, market_return_20d, market_state = _market_context_from_universe(universe, config)
+    ranking_snapshot = build_ranking_snapshot(universe, config, variant="quality_momentum_rank")
+    theme_alerts = [
+        format_theme_alert_brief(alert)
+        for alert in build_strong_theme_alerts(
+            ranking_snapshot,
+            market_breadth=market_breadth,
+            market_return_20d=market_return_20d,
+            market_state=market_state,
+            signal_frame=universe,
+        )
+    ]
     selector = UniverseSignalSelector(
         selection_config=config.selection,
         top_buy_n=config.strategy.buy_top_n,
@@ -104,8 +118,47 @@ def run_daily_signal_job(
         buy_candidates=executable_buy_candidates,
         sell_candidates=executable_sell_candidates if sellable_positions else [],
         notes=notes,
+        theme_alerts=theme_alerts,
     )
     markdown = render_markdown(board)
     output_path = base_dir / config.paths.reports_dir / f"signal-board-{actual_trade_date}.md"
     write_markdown(markdown, output_path)
     return output_path
+
+
+def _market_context_from_universe(universe, config: AppConfig) -> tuple[float, float, str]:
+    import pandas as pd
+
+    if universe.empty:
+        return 0.0, 0.0, "unknown"
+    frame = universe.copy()
+    if "is_candidate" in frame.columns:
+        pool = frame.loc[frame["is_candidate"].fillna(False).astype(bool)].copy()
+        if pool.empty:
+            pool = frame
+    else:
+        pool = frame
+    if pool.empty:
+        return 0.0, 0.0, "unknown"
+    close_to_ma_20 = _numeric_series(pool, "close_to_ma_20")
+    momentum_20d = _numeric_series(pool, "momentum_20d")
+    breadth_mask = ((close_to_ma_20 > 0) & (momentum_20d > 0)).fillna(False)
+    market_breadth = float(breadth_mask.mean()) if len(breadth_mask) else 0.0
+    market_return_20d = float(momentum_20d.median()) if momentum_20d.notna().any() else 0.0
+    normal_breadth = float(getattr(config.selection, "market_min_breadth", 0.35))
+    defensive_breadth = float(getattr(config.selection, "defensive_market_min_breadth", normal_breadth))
+    if market_breadth >= normal_breadth and market_return_20d >= 0.0:
+        market_state = "normal"
+    elif market_breadth >= defensive_breadth:
+        market_state = "defensive"
+    else:
+        market_state = "risk_off"
+    return market_breadth, market_return_20d, market_state
+
+
+def _numeric_series(frame, column: str):
+    import pandas as pd
+
+    if column not in frame.columns:
+        return pd.Series(pd.NA, index=frame.index, dtype="Float64")
+    return pd.to_numeric(frame[column], errors="coerce")

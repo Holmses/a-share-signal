@@ -4,6 +4,8 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .coverage
+node_modules
+*.tsbuildinfo
 dist
 build
 *.egg-info

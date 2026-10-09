@@ -39,6 +39,12 @@ def render_markdown(board: SignalBoard) -> str:
     ]
     lines.extend(_render_signal("卖出信号", board.sell_signal))
     lines.extend(_render_signal("买入信号", board.buy_signal))
+    if board.theme_alerts:
+        lines.append("## 强主线预警（仅观察）")
+        lines.append("")
+        for alert in board.theme_alerts:
+            lines.append(f"- {alert}")
+        lines.append("")
     lines.append("## 风险备注")
     lines.append("")
     for note in board.notes:
